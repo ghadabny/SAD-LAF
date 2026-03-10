@@ -1,0 +1,10 @@
+# Données et manipulation
+pandas==2.1.4
+numpy==1.26.2
+
+# Téléchargement du ZIP GTFS
+requests==2.31.0
+
+# Configuration (.env.dev)
+python-dotenv==1.0.0
+
