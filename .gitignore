@@ -51,3 +51,6 @@ logs/
 htmlcov/
 .coverage
 ```
+
+# ===Doc Explicative pour moi ===
+doc/
