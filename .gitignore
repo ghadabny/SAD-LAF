@@ -4,43 +4,50 @@ __pycache__/
 *$py.class
 venv/
 env/
-.env
-.venv
+.venv/
 build/
 dist/
 *.spec
 
-# === Configuration PyCharm ===
+# === Packaging Python (généré automatiquement par pip install -e .) ===
+*.egg-info/
+*.egg
+.eggs/
+
+# === Outils de développement ===
 .idea/
 *.iws
 out/
+repomix-output.xml
 
-# === Sécurité et Secrets (CRITIQUE pour OIV) ===
-# Ne jamais versionner les clés AD ou secrets Dataverse
+# === Configuration et Secrets ===
+config/.env.dev
 secrets.json
 config.yaml
 auth_tokens/
 *.pem
 *.key
 
-# === Données et Stockage (Données SNCF sensibles) ===
-# On ignore les données brutes et les exports Dataverse/GTFS
+# === Données SNCF (sensibles + volumineuses) ===
 data/raw/
 data/processed/
+data/models/
+data/outputs/
 *.csv
 *.xlsx
 *.json
-!patterns_config.json # Optionnel : garder uniquement les fichiers de config non sensibles
+!patterns_config.json
 
-# === Modèles Machine Learning (MLOps) ===
-# On ignore les fichiers lourds de modèles entraînés (utilisez MLflow ou DVC à la place)
+# === Modèles ML ===
 models/*.pkl
 models/*.joblib
 models/*.bst
 models/*.h5
 
-# === Logs et Monitoring ===
+# === Logs et CI ===
 logs/
 *.log
 .pytest_cache/
 htmlcov/
+.coverage
+```
