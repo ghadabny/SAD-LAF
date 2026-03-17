@@ -85,11 +85,11 @@ class RealtimeFetcher:
             data = self._parse_trip_updates(feed)
             self._save(data, "trip_updates.json")
             print(
-                f"[RealtimeFetcher] ✅ Trip Updates : "
+                f"[RealtimeFetcher] Trip Updates : "
                 f"{len(data['trip_updates'])} trains récupérés."
             )
         except Exception as e:
-            print(f"[RealtimeFetcher] ❌ Trip Updates : {e}")
+            print(f"[RealtimeFetcher] Trip Updates : {e}")
 
     def fetch_service_alerts(self) -> None:
         """
