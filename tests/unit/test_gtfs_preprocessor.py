@@ -57,6 +57,7 @@ class TestParseGtfsTime:
         assert result.iloc[0] == -1
 
 
+
 class TestBuildTroncons:
     """Tests d'intégration pour la méthode build_troncons."""
 
