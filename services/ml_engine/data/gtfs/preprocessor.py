@@ -16,71 +16,57 @@ class GTFSPreprocessor:
         )
     """
 
-    # Préfixes SNCF à supprimer des stop_id pour obtenir le code UIC (8 chiffres)
-    # Ordre important : du plus spécifique au plus générique
-    STOP_ID_PREFIXES = [
-        "StopPoint:OCETrain TER-",
-        "StopPoint:OCETGV INOUI-",
-        "StopPoint:OCETransilien-",
-        "StopPoint:OCE",
-    ]
-
     # route_type=2 = Rail régional (TER, Intercités)
     TER_ROUTE_TYPE = 2
 
-    # ----------------------------------------------------------------
-    # Méthodes de nettoyage
-    # Chacune a une responsabilité unique et est testable isolément
-    # ----------------------------------------------------------------
+    # Colonnes finales retournées par build_troncons()
+    TRONCON_COLUMNS = [
+        "trip_id", "train_number", "service_id", "stop_sequence",
+        "stop_id_dep", "stop_name_dep", "dep_minutes",
+        "stop_id_arr", "stop_name_arr", "arr_minutes",
+        "duration_min",
+    ]
+
+    # ── Méthodes publiques ────────────────────────────────────────────────────
 
     def clean_stop_id(self, stop_id: str) -> str:
         """
         Extrait le code UIC (8 chiffres) depuis un stop_id GTFS SNCF.
 
-        Tous les formats SNCF rencontrés suivent le même pattern :
+        Tous les formats SNCF suivent le même pattern :
             préfixe-XXXXXXXX  →  on prend ce qui est après le dernier tiret
 
         Exemples :
             "StopPoint:OCETrain TER-87723197"  → "87723197"
             "StopPoint:OCECar TER-87723197"    → "87723197"
             "StopPoint:OCELyria-87723197"      → "87723197"
-            "StopPoint:OCETGV INOUI-87723197"  → "87723197"
             "StopArea:OCE87723197"             → "87723197"
             "87723197"                         → "87723197" (inchangé)
 
         Pourquoi cette approche plutôt qu'une liste de préfixes ?
-            Une liste de préfixes doit être mise à jour chaque fois que
-            SNCF ajoute un nouveau service (Car TER, Lyria, OUIGO...).
-            Prendre ce qui suit le dernier tiret fonctionne pour tous
-            les formats présents et futurs — c'est le O de SOLID :
-            ouvert à l'extension, fermé à la modification.
+            Une liste doit être mise à jour chaque fois que SNCF ajoute
+            un nouveau service. Prendre ce qui suit le dernier tiret
+            fonctionne pour tous les formats présents et futurs.
+            C'est le O de SOLID : ouvert à l'extension, fermé à la modification.
         """
         if not isinstance(stop_id, str):
             return stop_id
-
-        # Cas 1 : contient un tiret → code UIC après le dernier tiret
         if "-" in stop_id:
             return stop_id.rsplit("-", 1)[-1]
-
-        # Cas 2 : StopArea:OCE suivi directement du code UIC (sans tiret)
-        # ex: "StopArea:OCE87723197"
         if stop_id.startswith("StopArea:OCE") or stop_id.startswith("StopPoint:OCE"):
             return stop_id[-8:]
-
-        # Cas 3 : déjà propre (ex: "87723197")
         return stop_id
 
     def parse_gtfs_time(self, time_series: pd.Series) -> pd.Series:
         """
         Convertit une série d'heures GTFS en minutes depuis minuit.
 
-        Nécessaire car le GTFS peut dépasser 24:00:00 pour les trains
-        de nuit (convention GTFS officielle).
+        Gère les heures > 24:00:00 (trains de nuit — convention GTFS officielle).
 
         Exemples :
             "09:16:00" → 556  minutes
             "25:30:00" → 1530 minutes (train de nuit)
-            valeur manquante → -1 (valeur sentinelle)
+            valeur invalide → -1 (valeur sentinelle)
         """
         def _to_minutes(t: str) -> int:
             try:
@@ -94,17 +80,10 @@ class GTFSPreprocessor:
     def filter_ter(
         self,
         trips: pd.DataFrame,
-        routes: pd.DataFrame
+        routes: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Filtre les trips pour ne conserver que les TER.
-
-        Paramètres:
-            trips  : DataFrame brut de trips.txt
-            routes : DataFrame brut de routes.txt
-
-        Retourne:
-            trips filtré sur les lignes de type rail régional (route_type=2)
+        Filtre les trips pour ne conserver que les TER (route_type=2).
         """
         ter_route_ids = routes[
             routes["route_type"] == self.TER_ROUTE_TYPE
@@ -116,11 +95,6 @@ class GTFSPreprocessor:
             f"{len(filtered):,} trips conservés sur {len(trips):,} total."
         )
         return filtered
-
-    # ----------------------------------------------------------------
-    # Construction des tronçons
-    # Méthode principale — orchestre les étapes dans l'ordre
-    # ----------------------------------------------------------------
 
     def build_troncons(
         self,
@@ -136,71 +110,105 @@ class GTFSPreprocessor:
         Un tronçon = un train entre deux arrêts CONSÉCUTIFS.
         C'est l'unité de granularité du scoring LAF.
 
-        Le principe repose sur un shift(-1) :
-            ligne N   : stop_id_dep, dep_minutes  (arrêt courant)
-            ligne N+1 : stop_id_arr, arr_minutes  (arrêt suivant)
-
         Paramètres:
             stop_times : DataFrame brut de stop_times.txt
             trips      : DataFrame brut de trips.txt
             stops      : DataFrame brut de stops.txt
             routes     : DataFrame brut de routes.txt
-            ter_only   : True  = filtre sur TER uniquement (recommandé)
-                         False = conserve tous les trains (TGV, TER, etc.)
+            ter_only   : True = filtre sur TER uniquement (recommandé)
 
-        Retourne un DataFrame avec les colonnes :
-            trip_id        : identifiant technique du trip
-            train_number   : numéro commercial du train (ex: 117756)
-            service_id     : identifiant du calendrier de circulation
-            stop_sequence  : numéro de l'arrêt de départ dans le trip
-            stop_id_dep    : code UIC gare de départ
-            stop_name_dep  : nom lisible gare de départ
-            dep_minutes    : heure de départ en minutes depuis minuit
-            stop_id_arr    : code UIC gare d'arrivée
-            stop_name_arr  : nom lisible gare d'arrivée
-            arr_minutes    : heure d'arrivée en minutes depuis minuit
-            duration_min   : durée du tronçon en minutes
+        Retourne un DataFrame avec les colonnes définies dans TRONCON_COLUMNS.
         """
         print("[GTFSPreprocessor] Construction des tronçons en cours...")
 
-        # Étape 1 : filtrer sur les TER si demandé
         if ter_only:
             trips = self.filter_ter(trips, routes)
 
-        # Étape 2 : joindre trip_headsign et service_id sur stop_times
-        # trip_headsign = numéro commercial du train (ex: 117756)
-        trips_light = trips[["trip_id", "trip_headsign", "service_id"]].copy()
-        stop_times = stop_times.merge(trips_light, on="trip_id", how="inner")
+        stop_times = self._join_trips(stop_times, trips)
+        stop_times = self._join_stop_names(stop_times, stops)
+        stop_times = self._convert_times(stop_times)
+        stop_times = self._sort(stop_times)
+        troncons   = self._apply_shift(stop_times)
+        troncons   = self._filter_invalid(troncons)
 
-        # Étape 3 : nettoyer les stop_id (supprimer préfixes SNCF)
+        print(
+            f"[GTFSPreprocessor] {len(troncons):,} tronçons construits "
+            f"({troncons['trip_id'].nunique():,} trips, "
+            f"{troncons['stop_name_dep'].nunique():,} gares de départ uniques)."
+        )
+        return troncons[self.TRONCON_COLUMNS].reset_index(drop=True)
+
+    # ── Méthodes privées — une étape = une méthode ────────────────────────────
+
+    def _join_trips(
+        self,
+        stop_times: pd.DataFrame,
+        trips: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Joint trip_headsign (numéro commercial) et service_id sur stop_times.
+        On ne garde que les colonnes utiles de trips pour éviter les collisions.
+        """
+        trips_light = trips[["trip_id", "trip_headsign", "service_id"]].copy()
+        return stop_times.merge(trips_light, on="trip_id", how="inner")
+
+    def _join_stop_names(
+        self,
+        stop_times: pd.DataFrame,
+        stops: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Nettoie les stop_id et joint les noms de gares lisibles.
+        On ne garde que les arrêts physiques (location_type=0),
+        pas les stations mères (location_type=1).
+        """
         stops = stops.copy()
         stops["stop_id_clean"] = stops["stop_id"].apply(self.clean_stop_id)
         stop_times["stop_id_clean"] = stop_times["stop_id"].apply(self.clean_stop_id)
 
-        # Étape 4 : joindre les noms de gares lisibles
-        # On ne garde que les arrêts (location_type=0), pas les stations mères
         stops_light = (
             stops[stops["location_type"] == 0][["stop_id_clean", "stop_name"]]
             .drop_duplicates("stop_id_clean")
         )
-        stop_times = stop_times.merge(stops_light, on="stop_id_clean", how="left")
+        return stop_times.merge(stops_light, on="stop_id_clean", how="left")
 
-        # Étape 5 : convertir les heures en minutes depuis minuit
+    def _convert_times(self, stop_times: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convertit departure_time et arrival_time en minutes depuis minuit.
+        Gère les heures > 24:00 (trains de nuit).
+        """
+        stop_times = stop_times.copy()
         stop_times["dep_minutes"] = self.parse_gtfs_time(stop_times["departure_time"])
         stop_times["arr_minutes"] = self.parse_gtfs_time(stop_times["arrival_time"])
+        return stop_times
 
-        # Étape 6 : trier par trip et séquence d'arrêt
-        # CRUCIAL : l'ordre doit être correct avant le shift
-        stop_times = stop_times.sort_values(
+    def _sort(self, stop_times: pd.DataFrame) -> pd.DataFrame:
+        """
+        Trie par trip_id puis stop_sequence.
+        CRUCIAL : le tri doit être correct avant le shift(-1).
+        Si les lignes ne sont pas dans l'ordre, le shift créerait
+        des tronçons entre des arrêts non consécutifs.
+        """
+        return stop_times.sort_values(
             ["trip_id", "stop_sequence"]
         ).reset_index(drop=True)
 
-        # Étape 7 : shift(-1) pour obtenir l'arrêt SUIVANT sur chaque ligne
-        # Avant shift :                   Après shift(-1) sur colonnes _arr :
-        # trip_id  stop_name              stop_id_arr   arr_minutes
-        # TRAIN_A  Strasbourg      →      Sélestat      ...
-        # TRAIN_A  Sélestat        →      Colmar        ...
-        # TRAIN_A  Colmar          →      (TRAIN_B)     ← supprimé étape 8
+    def _apply_shift(self, stop_times: pd.DataFrame) -> pd.DataFrame:
+        """
+        Construit les tronçons via shift(-1).
+
+        Principe : décale les colonnes d'arrêt d'une ligne vers le haut.
+        Chaque ligne obtient alors les infos de l'arrêt SUIVANT.
+
+            Avant shift :          Après shift(-1) :
+            Strasbourg 08:23  →   stop_id_arr = Sélestat, arr_min = 532
+            Sélestat   08:52  →   stop_id_arr = Colmar,   arr_min = 555
+            Colmar     09:15  →   stop_id_arr = NaN  ← supprimé ensuite
+
+        Le tri préalable (_sort) garantit que les trips sont regroupés.
+        On filtre ensuite les fausses lignes de fin de trip
+        (trip_id courant ≠ trip_id décalé).
+        """
         next_stop = stop_times.shift(-1)
 
         troncons = pd.DataFrame({
@@ -216,30 +224,26 @@ class GTFSPreprocessor:
             "arr_minutes":   next_stop["arr_minutes"],
         })
 
-        # Étape 8 : supprimer les fausses lignes de fin de trip
-        # Quand on fait shift(-1), la dernière ligne de chaque trip
-        # récupère les données du trip suivant → c'est une erreur à supprimer
+        # Supprimer les fausses lignes de fin de trip
         mask = stop_times["trip_id"] == next_stop["trip_id"]
         troncons = troncons[mask].reset_index(drop=True)
 
-        # Étape 9 : calculer la durée du tronçon en minutes
         troncons["duration_min"] = troncons["arr_minutes"] - troncons["dep_minutes"]
+        return troncons
 
-        # Étape 10 : supprimer les tronçons avec données invalides
-        # (heures manquantes = valeur sentinelle -1, durées négatives)
+    def _filter_invalid(self, troncons: pd.DataFrame) -> pd.DataFrame:
+        """
+        Supprime les tronçons avec des données invalides :
+            - dep_minutes ou arr_minutes = -1 (heure GTFS non parseable)
+            - duration_min <= 0 (durée négative ou nulle)
+        """
         before = len(troncons)
         troncons = troncons[
             (troncons["dep_minutes"] >= 0) &
             (troncons["arr_minutes"] >= 0) &
             (troncons["duration_min"] > 0)
-        ].reset_index(drop=True)
+        ]
         removed = before - len(troncons)
         if removed > 0:
             print(f"[GTFSPreprocessor] {removed} tronçons invalides supprimés.")
-
-        print(
-            f"[GTFSPreprocessor] {len(troncons):,} tronçons construits "
-            f"({troncons['trip_id'].nunique():,} trips, "
-            f"{troncons['stop_name_dep'].nunique():,} gares de départ uniques)."
-        )
         return troncons
