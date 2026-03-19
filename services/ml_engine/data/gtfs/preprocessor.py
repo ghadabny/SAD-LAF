@@ -35,17 +35,39 @@ class GTFSPreprocessor:
 
     def clean_stop_id(self, stop_id: str) -> str:
         """
-        Supprime les préfixes SNCF dans un stop_id pour obtenir
-        le code UIC de la gare (8 chiffres).
+        Extrait le code UIC (8 chiffres) depuis un stop_id GTFS SNCF.
+
+        Tous les formats SNCF rencontrés suivent le même pattern :
+            préfixe-XXXXXXXX  →  on prend ce qui est après le dernier tiret
 
         Exemples :
-            "StopPoint:OCETrain TER-87723197" → "87723197"
-            "StopPoint:OCETGV INOUI-87723197" → "87723197"
+            "StopPoint:OCETrain TER-87723197"  → "87723197"
+            "StopPoint:OCECar TER-87723197"    → "87723197"
+            "StopPoint:OCELyria-87723197"      → "87723197"
+            "StopPoint:OCETGV INOUI-87723197"  → "87723197"
+            "StopArea:OCE87723197"             → "87723197"
             "87723197"                         → "87723197" (inchangé)
+
+        Pourquoi cette approche plutôt qu'une liste de préfixes ?
+            Une liste de préfixes doit être mise à jour chaque fois que
+            SNCF ajoute un nouveau service (Car TER, Lyria, OUIGO...).
+            Prendre ce qui suit le dernier tiret fonctionne pour tous
+            les formats présents et futurs — c'est le O de SOLID :
+            ouvert à l'extension, fermé à la modification.
         """
-        for prefix in self.STOP_ID_PREFIXES:
-            if isinstance(stop_id, str) and stop_id.startswith(prefix):
-                return stop_id[len(prefix):]
+        if not isinstance(stop_id, str):
+            return stop_id
+
+        # Cas 1 : contient un tiret → code UIC après le dernier tiret
+        if "-" in stop_id:
+            return stop_id.rsplit("-", 1)[-1]
+
+        # Cas 2 : StopArea:OCE suivi directement du code UIC (sans tiret)
+        # ex: "StopArea:OCE87723197"
+        if stop_id.startswith("StopArea:OCE") or stop_id.startswith("StopPoint:OCE"):
+            return stop_id[-8:]
+
+        # Cas 3 : déjà propre (ex: "87723197")
         return stop_id
 
     def parse_gtfs_time(self, time_series: pd.Series) -> pd.Series:
