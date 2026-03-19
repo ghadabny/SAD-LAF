@@ -1,0 +1,133 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml — SAD-LAF
+#
+# Orchestre les 4 services de l'architecture on-premise (ThinkStation).
+#
+# Architecture :
+#
+#   scheduler ──(écrit)──→ data/raw/gtfs/     ←──(lit)── api
+#             ──(écrit)──→ data/raw/gtfs_rt/  ←──(lit)── ml_engine
+#             ──(lance)──→ ml_engine
+#
+#   ml_engine ──(écrit)──→ data/outputs/      ←──(lit)── exporter
+#             ──(écrit)──→ data/models/        ←──(lit)── api
+#
+#   exporter  ──(écrit)──→ data/outputs/json/  → Dataverse (via OneDrive)
+#
+# Tous les services partagent le même volume "sad-laf-data"
+# qui correspond au dossier data/ sur la ThinkStation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.9"
+
+services:
+
+  # ── API FastAPI ─────────────────────────────────────────────────────────────
+  # Toujours up — répond aux requêtes de Power Apps / Postman
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: sad-laf-api
+    ports:
+      # "8000:8000" = port_hôte:port_container
+      # Depuis la ThinkStation : http://localhost:8000
+      # Depuis le réseau SNCF  : http://IP_THINKSTATION:8000
+      - "8000:8000"
+    volumes:
+      # Monte le dossier data/ de la ThinkStation dans le container
+      # Le container voit data/ comme s'il était local
+      - sad-laf-data:/app/data
+      # Monte config/ pour lire .env.dev
+      - ./config:/app/config:ro  # ro = read-only, le container ne peut pas modifier
+    env_file:
+      - config/.env.dev
+    restart: always  # redémarre automatiquement si le container plante ou si la ThinkStation reboot
+    healthcheck:
+      # Docker vérifie toutes les 30s que l'API répond bien
+      # Si 3 checks consécutifs échouent → container marqué "unhealthy"
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s  # attend 10s avant le premier check (temps de démarrage)
+
+  # ── Scheduler APScheduler ───────────────────────────────────────────────────
+  # Toujours up — déclenche les jobs à heures fixes
+  scheduler:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    container_name: sad-laf-scheduler
+    volumes:
+      - sad-laf-data:/app/data
+      - ./config:/app/config:ro
+    env_file:
+      - config/.env.dev
+    restart: always
+    # Le scheduler dépend de rien au démarrage
+    # Il télécharge le GTFS lui-même à 03:00
+
+  # ── ML Engine ───────────────────────────────────────────────────────────────
+  # Service batch — ne tourne PAS en continu
+  # Lancé par le scheduler après le téléchargement GTFS
+  # profiles: ["batch"] = ne démarre PAS avec "docker compose up"
+  #                        se lance avec "docker compose run ml_engine"
+  ml_engine:
+    build:
+      context: .
+      dockerfile: services/ml_engine/Dockerfile
+    container_name: sad-laf-ml-engine
+    volumes:
+      - sad-laf-data:/app/data
+      - ./config:/app/config:ro
+    env_file:
+      - config/.env.dev
+    profiles:
+      - batch  # ← ne démarre pas automatiquement
+    # Pas de restart: always car c'est un batch qui doit s'arrêter après exécution
+
+  # ── OR Engine ───────────────────────────────────────────────────────────────
+  # Service batch — lancé après ml_engine
+  # Consomme les scores ML et génère les tournées optimisées via PuLP/CBC
+  or_engine:
+    build:
+      context: .
+      dockerfile: services/or_engine/Dockerfile
+    container_name: sad-laf-or-engine
+    volumes:
+      - sad-laf-data:/app/data
+      - ./config:/app/config:ro
+    env_file:
+      - config/.env.dev
+    profiles:
+      - batch  # ← ne démarre pas automatiquement
+
+  # ── Exporter ────────────────────────────────────────────────────────────────
+  # Service batch — lancé après ml_engine
+  exporter:
+    build:
+      context: .
+      dockerfile: services/exporter/Dockerfile
+    container_name: sad-laf-exporter
+    volumes:
+      - sad-laf-data:/app/data
+      - ./config:/app/config:ro
+    env_file:
+      - config/.env.dev
+    profiles:
+      - batch  # ← ne démarre pas automatiquement
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volumes
+#
+# "sad-laf-data" est un volume nommé Docker.
+# Il correspond physiquement à un dossier géré par Docker sur la ThinkStation
+# (par défaut : /var/lib/docker/volumes/sad-laf-data/).
+#
+# Tous les services qui montent ce volume voient les mêmes fichiers.
+# C'est comme un dossier réseau partagé, mais local.
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  sad-laf-data:
+    driver: local
