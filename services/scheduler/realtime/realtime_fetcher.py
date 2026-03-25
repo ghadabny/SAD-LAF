@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
 from pathlib import Path
+import getpass
+
 
 import requests
 from google.transit import gtfs_realtime_pb2
@@ -233,10 +235,12 @@ class RealtimeFetcher:
     # ── Méthodes privées — téléchargement et parsing ─────────────────────────
 
     def _fetch_protobuf(self, url: str):
-        """
-        Télécharge un flux GTFS-RT et le décode depuis le format Protobuf.
-        """
-        response = requests.get(url, timeout=30)
+        proxies = (
+            {"http": config.HTTP_PROXY, "https": config.HTTPS_PROXY}
+            if config.HTTP_PROXY
+            else None
+        )
+        response = requests.get(url, timeout=30, proxies=proxies)
         response.raise_for_status()
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(response.content)
