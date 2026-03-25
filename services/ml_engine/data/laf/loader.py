@@ -264,7 +264,7 @@ class LAFLoader:
         """
         if not self.laf_dir.exists():
             return None
-        pattern = f"*_{tag}_*.csv"
+        pattern = f"*{tag}*.csv"
         matches = sorted(self.laf_dir.glob(pattern))
         if not matches:
             return None
@@ -284,7 +284,7 @@ class LAFLoader:
         """
         if not self.laf_dir.exists():
             return []
-        pattern = f"*_{tag}_*.csv"
+        pattern = f"*{tag}*.csv"
         return sorted(self.laf_dir.glob(pattern))
 
     def _detect_separator(self, path: Path) -> str:
