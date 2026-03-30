@@ -11,18 +11,18 @@ class LAFLoader:
 
     Trois sources de données :
         CC   (Contrôles Comportés)  : ~1,7M lignes, séparateur ';', encoding latin-1
-             Nommage réel : Extract_DATA_GE_CC_*.csv
+             Nommage réel : Extract_DATA GE CC *.csv
         SC   (Titres Scannés)       : ~35M lignes (fichiers trimestriels),
              même structure que CC, séparateur ',', encoding latin-1
-             Nommage réel : Extract_DATA_GE_SC_*.csv
+             Nommage réel : Extract_DATA GE SC *.csv
         PV   (Procès-Verbaux)       : ~0,6M lignes, séparateur ',', encoding latin-1
-             Nommage réel : Extract_DATA_GE_PV_*.csv
+             Nommage réel : Extract_DATA GE PV *.csv
 
     Pourquoi des patterns glob plutôt que des noms en dur ?
         Les fichiers sont livrés avec la date d'extraction dans leur nom :
-        "Extract_DATA_GE_CC_202201-202602_20260320.csv"
+        "Extract_DATA GE CC 202201-202602 20260320.csv"
         Ce nom changera à chaque nouvelle livraison. Un nom en dur casserait
-        le loader dès la prochaine extraction. Le pattern *_CC_* est robuste.
+        le loader dès la prochaine extraction. Le pattern *CC* est robuste.
 
     Pourquoi fail-soft (retour DataFrame vide) plutôt que fail-fast ?
         Le pipeline tourne chaque nuit. Si un seul fichier est absent,
@@ -43,6 +43,7 @@ class LAFLoader:
         sc = loader.load_sc()          # tout en mémoire (~35M lignes)
         for chunk in loader.load_sc_chunked(500_000):
             process(chunk)
+        all_paths = loader.get_all_laf_paths()   # pour le cache fingerprint
     """
 
     # Colonnes exactes des fichiers réels (ordre extrait des headers CSV)
@@ -135,7 +136,7 @@ class LAFLoader:
         """
         Charge le fichier CC (Contrôles Comportés).
 
-        Pattern : *_CC_*.csv dans config.LAF_DIR
+        Pattern : *CC*.csv dans config.LAF_DIR
         Séparateur détecté automatiquement (';' dans les fichiers réels CC)
         Encoding : latin-1
 
@@ -162,7 +163,7 @@ class LAFLoader:
         """
         Charge le fichier PV (Procès-Verbaux).
 
-        Pattern : *_PV_*.csv dans config.LAF_DIR
+        Pattern : *PV*.csv dans config.LAF_DIR
         Séparateur détecté automatiquement (',' dans les fichiers réels PV)
         Encoding : latin-1
 
@@ -189,7 +190,7 @@ class LAFLoader:
         """
         Charge et concatène tous les fichiers SC (Titres Scannés).
 
-        Pattern : *_SC_*.csv dans config.LAF_DIR
+        Pattern : *SC*.csv dans config.LAF_DIR
         Plusieurs fichiers possibles (livraisons trimestrielles).
         ATTENTION : ~35M lignes au total → peut nécessiter 4-6 Go de RAM.
         Préférer load_sc_chunked() si la mémoire est limitée.
@@ -252,11 +253,41 @@ class LAFLoader:
             )
             yield from reader
 
+    def get_all_laf_paths(self) -> list[Path]:
+        """
+        Retourne la liste de tous les fichiers LAF présents (CC + SC + PV).
+
+        Utilisé par le système de cache pour calculer l'empreinte des sources.
+        Si les fichiers changent (nouvelle livraison, mise à jour), l'empreinte
+        change → le cache est invalidé → recalcul automatique.
+
+        Retourne une liste vide si le dossier LAF est absent.
+        """
+        if not self.laf_dir.exists():
+            return []
+
+        paths: list[Path] = []
+
+        # CC (fichier unique)
+        cc = self._find_file("CC")
+        if cc:
+            paths.append(cc)
+
+        # PV (fichier unique)
+        pv = self._find_file("PV")
+        if pv:
+            paths.append(pv)
+
+        # SC (fichiers trimestriels multiples)
+        paths.extend(self._find_files("SC"))
+
+        return sorted(paths)
+
     # ── Méthodes privées ──────────────────────────────────────────────────────
 
     def _find_file(self, tag: str) -> Path | None:
         """
-        Cherche un fichier unique correspondant au pattern *_{TAG}_*.csv.
+        Cherche un fichier unique correspondant au pattern *{TAG}*.csv.
 
         Retourne le premier fichier trouvé, ou None si absent / dossier inexistant.
         Si plusieurs fichiers correspondent, log un avertissement et prend le premier
@@ -277,7 +308,7 @@ class LAFLoader:
 
     def _find_files(self, tag: str) -> list[Path]:
         """
-        Cherche tous les fichiers correspondant au pattern *_{TAG}_*.csv.
+        Cherche tous les fichiers correspondant au pattern *{TAG}*.csv.
 
         Retourne une liste vide si le dossier est absent ou si aucun fichier
         ne correspond.
