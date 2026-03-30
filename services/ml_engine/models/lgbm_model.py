@@ -101,16 +101,6 @@ class LGBMScorer(BaseScorer):
     def train(self, df: pd.DataFrame, target_col: str = "fraud_score") -> "LGBMScorer":
         """
         Entraîne le modèle LightGBM.
-
-        La liste des features est déterminée automatiquement : toutes les colonnes
-        numériques du DataFrame, moins les colonnes exclues (COLS_NON_FEATURES).
-        Cette approche est plus robuste qu'une liste en dur : si on ajoute une
-        feature dans le pipeline, elle est automatiquement incluse sans modifier
-        ce fichier (principe O de SOLID).
-
-        Paramètres :
-            df         : DataFrame de tronçons avec toutes les features calculées
-            target_col : nom de la colonne cible (défaut : 'fraud_score')
         """
         if target_col not in df.columns:
             raise ValueError(
@@ -118,9 +108,13 @@ class LGBMScorer(BaseScorer):
                 f"Colonnes disponibles : {list(df.columns)}"
             )
 
+        # --- CORRECTION 1 : Forcer les booléens en entiers (0/1) ---
+        # Empêche les features temporelles (is_weekend, etc.) de disparaître
+        for col in df.columns:
+            if pd.api.types.is_bool_dtype(df[col]):
+                df[col] = df[col].astype(int)
+
         # ── Sélection automatique des features ────────────────────────────────
-        # 1. On prend toutes les colonnes numériques
-        # 2. On exclut les colonnes non-features (cible, identifiants, composants)
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         self.feature_cols = [
             col for col in numeric_cols
@@ -139,23 +133,28 @@ class LGBMScorer(BaseScorer):
         )
 
         # ── Vérification anti-leakage ─────────────────────────────────────────
-        # Détecte si une feature est quasi-colinéaire avec la cible.
         self._check_leakage(df, target_col)
 
         X = df[self.feature_cols]
         y = df[target_col]
 
         lgb_data = lgb.Dataset(X, label=y, feature_name=self.feature_cols)
+
+        # --- CORRECTION 2 : Gestion silencieuse de n_estimators ---
+        # On extrait 'n_estimators' pour ne pas l'envoyer en double
+        params_clean = self.params.copy()
+        n_rounds = params_clean.pop("n_estimators", 200) # 200 par défaut si non trouvé
+        params_clean.pop("num_boost_round", None)
+
         self.model = lgb.train(
-            self.params,
+            params_clean,
             lgb_data,
-            num_boost_round=200,
+            num_boost_round=n_rounds,
         )
 
-        # ── Métriques d'entraînement rapides (sur le train) ───────────────────
-        # Note : ne pas interpréter comme des métriques de généralisation.
-        # Les vraies métriques sont calculées dans train.py sur le test set.
+        # ── Métriques d'entraînement rapides ──────────────────────────────────
         y_pred_train = self.model.predict(X.values)
+        import math
         rmse_train = math.sqrt(((y.values - y_pred_train) ** 2).mean())
         print(f"[LGBMScorer] RMSE train (informatif seulement) : {rmse_train:.4f}")
 
@@ -283,6 +282,12 @@ class LGBMScorer(BaseScorer):
         high_corr = []
         for col in self.feature_cols:
             if col in df.columns:
+                # --- AJOUT : Ignore les colonnes constantes (écart-type de 0) ---
+                # Évite le RuntimeWarning de Numpy lors du calcul de la corrélation
+                if df[col].nunique() <= 1:
+                    continue
+                # ----------------------------------------------------------------
+
                 corr = abs(df[col].corr(y))
                 if corr > 0.95:
                     high_corr.append((col, round(corr, 4)))
