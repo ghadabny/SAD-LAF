@@ -59,7 +59,7 @@ class AppConfig:
     MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", "data/models"))
     OUTPUTS_DIR: Path = Path(os.getenv("OUTPUTS_DIR", "data/outputs"))
     PROCESSED_DIR: Path = Path(os.getenv("PROCESSED_DIR", "data/processed"))
-    HYPERPARAMS_PATH: Path = Path('config/hyperparameters.yaml')
+    HYPERPARAMS_PATH: Path = Path('services/ml_engine/config/hyperparameters.yml')
 
     @property
     def lgbm_params(self) -> dict:
