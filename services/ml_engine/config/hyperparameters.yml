@@ -2,8 +2,11 @@ lgbm:
   objective: "regression"
   metric: "rmse"
   boosting_type: "gbdt"
-  learning_rate: 0.05
+  learning_rate: 0.03        # On ralentit un tout petit peu l'apprentissage
   num_leaves: 31
-  n_estimators: 100
+  n_estimators: 1200         # On baisse le nombre d'arbres pour éviter le par cœur
+  subsample: 0.8             # L'arbre n'a le droit de voir que 80% des lignes
+  colsample_bytree: 0.8      # L'arbre n'a le droit d'utiliser que 80% des colonnes
+  min_child_samples: 30      # On interdit de créer des règles sur des micro-cas isolés
   verbose: -1
   random_state: 42
