@@ -1,184 +1,615 @@
-import sys
+# services/ml_engine/train.py
+"""
+Point d'entrée de l'entraînement du modèle SAD-LAF.
+
+Architecture du pipeline d'entraînement :
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  ÉTAPE 1 : GTFS (rapide, ~10s, pas de cache nécessaire)        │
+    │  load_stop_times + load_trips + load_stops + load_routes        │
+    │  → troncons_gtfs (296K tronçons TER)                           │
+    └───────────────────────────┬─────────────────────────────────────┘
+                                │
+    ┌───────────────────────────▼─────────────────────────────────────┐
+    │  ÉTAPE 2 : LAF STATS (lent, ~30min sans cache)       [CACHE L1] │
+    │  SC + CC + PV → build_unified_stats()                           │
+    │  → fraud_score, nb_controles, nb_pv, pv_intensity, ...         │
+    └───────────────────────────┬─────────────────────────────────────┘
+                                │
+    ┌───────────────────────────▼─────────────────────────────────────┐
+    │  ÉTAPE 3 : MERGE GTFS × LAF          [CACHE L2]                 │
+    │  → df_merged (78K-100K tronçons avec historique brut)           │
+    └───────────────────────────┬─────────────────────────────────────┘
+                                │
+    ┌───────────────────────────▼─────────────────────────────────────┐
+    │  ÉTAPE 4 : TRAIN/TEST SPLIT  ← DOIT PRÉCÉDER LE FIT DU PIPELINE│
+    │  train_test_split(df_merged, test_size=0.2, random_state=42)    │
+    │  → df_train_raw (80%) | df_test_raw (20%)                       │
+    └───────────────────────────┬─────────────────────────────────────┘
+                                │
+    ┌───────────────────────────▼─────────────────────────────────────┐
+    │  ÉTAPE 5 : FEATURES — fit sur TRAIN uniquement                   │
+    │  pipeline.fit_transform(df_train_raw)                           │
+    │  pipeline.transform(df_test_raw)      ← jamais fit() sur test   │
+    │  Sauvegarde : feature_pipeline.joblib                           │
+    └───────────────────────────┬─────────────────────────────────────┘
+                                │
+    ┌───────────────────────────▼─────────────────────────────────────┐
+    │  ÉTAPE 6 : ENTRAÎNEMENT LIGHTGBM + ÉVALUATION                   │
+    │  LGBMScorer.train(df_train_features)                            │
+    │  scorer.evaluate(df_test_features)                              │
+    │  Sauvegarde : lgbm_scorer.joblib + training_history.json        │
+    └─────────────────────────────────────────────────────────────────┘
+
+CORRECTION ANTI-LEAKAGE (v2) :
+    Le split train/test se fait maintenant AVANT fit_transform().
+    Avant (v1, BUGUÉ) :
+        df_features = pipeline.fit_transform(df_COMPLET)   # ← fuite temporelle
+        df_train, df_test = train_test_split(df_features)
+    Après (v2, CORRIGÉ) :
+        df_train_raw, df_test_raw = train_test_split(df_merged)  # ← split d'abord
+        df_train = pipeline.fit_transform(df_train_raw)          # ← fit sur train seul
+        df_test  = pipeline.transform(df_test_raw)               # ← transform seulement
+
+Options CLI :
+    --force-recompute-laf   : invalide le cache L1 (LAF stats)
+    --force-recompute-all   : invalide les caches L1 + L2
+    (sans option)           : utilise les caches existants si disponibles
+
+Exemple :
+    python services/ml_engine/train.py
+    python services/ml_engine/train.py --force-recompute-laf
+    python services/ml_engine/train.py --force-recompute-all
+"""
+import argparse
 import json
-import pandas as pd
-from datetime import datetime
+import sys
+from datetime import date, datetime
 from pathlib import Path
+
+import pandas as pd
+
+try:
+    from sklearn.metrics import root_mean_squared_error as _rmse_fn
+    def _rmse(y_true, y_pred):
+        return _rmse_fn(y_true, y_pred)
+except ImportError:
+    from sklearn.metrics import mean_squared_error as _mse_fn
+    def _rmse(y_true, y_pred):
+        return _mse_fn(y_true, y_pred, squared=False)
+
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
 
-# Imports Configuration
 from shared.config import config
-
-# Imports GTFS
+from services.ml_engine.data.cache import DataCache
 from services.ml_engine.data.gtfs.loader import GTFSLoader
 from services.ml_engine.data.gtfs.preprocessor import GTFSPreprocessor
-
-# Imports LAF
 from services.ml_engine.data.laf.loader import LAFLoader
 from services.ml_engine.data.laf.preprocessor import LAFPreprocessor
-
-# Imports Features & Models
 from services.ml_engine.features.pipeline import FeaturePipeline
 from services.ml_engine.features.temporal import TemporalFeatureTransformer
 from services.ml_engine.features.historical import HistoricalFeatureTransformer
 from services.ml_engine.models.lgbm_model import LGBMScorer
 
 
-def load_and_prepare_data() -> pd.DataFrame:
-    """Charge et fusionne les données GTFS et LAF."""
-    print("📊 1/4 - Chargement et préparation des données (GTFS + LAF)...")
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAPE 1 : GTFS
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # 1. Traitement GTFS
-    gtfs_loader = GTFSLoader()
-    stop_times = gtfs_loader.load_stop_times()
-    trips = gtfs_loader.load_trips()
-    stops = gtfs_loader.load_stops()
-    routes = gtfs_loader.load_routes()
+def _load_gtfs() -> pd.DataFrame:
+    """
+    Charge et prépare les tronçons GTFS TER.
+    Pas de cache nécessaire : charge en ~10s et reste stable.
+    """
+    print("\n📡 GTFS — Chargement des tronçons TER...")
+    loader = GTFSLoader()
+    troncons = GTFSPreprocessor().build_troncons(
+        loader.load_stop_times(),
+        loader.load_trips(),
+        loader.load_stops(),
+        loader.load_routes(),
+        ter_only=True,
+    )
+    print(f"   → {len(troncons):,} tronçons GTFS TER disponibles.")
+    return troncons
 
-    gtfs_preprocessor = GTFSPreprocessor()
-    troncons_gtfs = gtfs_preprocessor.build_troncons(
-        stop_times, trips, stops, routes, ter_only=True
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAPE 2 : LAF STATS [CACHE L1]
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_laf_unified_stats(
+    cache: DataCache,
+    loader: LAFLoader,
+    preprocessor: LAFPreprocessor,
+    force_recompute: bool = False,
+) -> pd.DataFrame:
+    """
+    Produit les statistiques unifiées SC + CC + PV par troncon_id.
+
+    IMPORTANT : cette fonction calcule des statistiques sur la TOTALITÉ
+    de la période historique (2022-2026). Ce n'est pas du leakage ici car
+    ces statistiques représentent le "profil historique long terme" d'un
+    tronçon — elles ne fuient pas d'une fenêtre temporelle test vers train.
+    Le leakage était dans le FIT du transformer sur le dataset complet
+    (corrigé dans _build_features_and_split).
+    """
+    laf_paths = loader.get_all_laf_paths()
+    if not laf_paths:
+        raise FileNotFoundError(
+            f"❌ Aucun fichier LAF trouvé dans '{config.LAF_DIR}'. "
+            f"Vérifie que les fichiers CC, SC et PV sont présents."
+        )
+
+    cache_key = cache.make_key("laf_unified_stats", laf_paths)
+
+    if not force_recompute:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    print("\n🔄 LAF — Calcul des statistiques (non caché, peut prendre ~30min)...")
+    print(f"   Fichiers source : {[p.name for p in laf_paths]}")
+
+    # ── Traitement SC (par chunks pour économiser la RAM) ──────────────────
+    print("\n   [SC] Traitement des titres scannés par chunks de 500K lignes...")
+    sc_stats_list: list[pd.DataFrame] = []
+    chunk_count = 0
+
+    for chunk in loader.load_sc_chunked(chunksize=500_000):
+        clean = preprocessor.clean_cc(chunk)
+        if not clean.empty:
+            sc_stats_list.append(preprocessor.build_troncon_stats(clean))
+        chunk_count += 1
+        if chunk_count % 10 == 0:
+            print(f"   [SC] {chunk_count} chunks traités ({chunk_count * 500_000:,} lignes)...")
+
+    print(f"   [SC] Terminé : {chunk_count} chunks, {len(sc_stats_list)} chunks avec données.")
+
+    # ── Traitement CC ──────────────────────────────────────────────────────
+    print("\n   [CC] Traitement des contrôles comportés...")
+    cc_clean = preprocessor.clean_cc(loader.load_cc())
+    if not cc_clean.empty:
+        sc_stats_list.append(preprocessor.build_troncon_stats(cc_clean))
+        print(f"   [CC] {len(cc_clean):,} lignes valides ajoutées.")
+    else:
+        print("   [CC] Aucune ligne valide.")
+
+    if not sc_stats_list:
+        raise ValueError(
+            "❌ Aucune donnée CC/SC valide après nettoyage. "
+            "Vérifie que les fichiers SC trimestriels sont présents et lisibles."
+        )
+
+    # ── Agrégation finale CC/SC ────────────────────────────────────────────
+    print("\n   [CC/SC] Agrégation finale sur tous les fichiers/chunks...")
+    cc_sc_stats = (
+        pd.concat(sc_stats_list, ignore_index=True)
+        .groupby("troncon_id", as_index=False)
+        .agg(
+            nb_controles=("nb_controles", "sum"),
+            nb_irregularites=("nb_irregularites", "sum"),
+        )
+    )
+    cc_sc_stats["taux_irregularite"] = (
+        cc_sc_stats["nb_irregularites"] / cc_sc_stats["nb_controles"]
+    ).round(4)
+    print(
+        f"   [CC/SC] {len(cc_sc_stats):,} tronçons uniques, "
+        f"taux moyen = {cc_sc_stats['taux_irregularite'].mean():.3f}."
     )
 
-    # 2. Traitement LAF
-    print("[LAFLoader] Chargement des historiques (CC)...")
-    laf_loader = LAFLoader()
-    df_cc = laf_loader.load_cc()
-    # Note: Pour le ML actuel, on n'a besoin que des CC pour le taux d'irrégularité
+    # ── Traitement PV ──────────────────────────────────────────────────────
+    print("\n   [PV] Traitement des procès-verbaux...")
+    pv_raw = loader.load_pv()
+    if pv_raw.empty:
+        print("   [PV] Fichier absent ou vide — fraud_score basé sur CC/SC uniquement.")
+        pv_stats = pd.DataFrame()
+    else:
+        pv_clean = preprocessor.clean_pv(pv_raw)
+        pv_stats = preprocessor.build_pv_stats(pv_clean)
+        print(f"   [PV] {len(pv_stats):,} tronçons avec au moins 1 PV.")
 
-    print("[LAFPreprocessor] Nettoyage et calcul du taux de fraude...")
-    laf_preprocessor = LAFPreprocessor()
-    cc_clean = laf_preprocessor.clean_cc(df_cc)
-    stats_laf = laf_preprocessor.build_troncon_stats(cc_clean)
+    # ── Unification ────────────────────────────────────────────────────────
+    print("\n   Unification CC/SC + PV → fraud_score unifié...")
+    unified = preprocessor.build_unified_stats(cc_sc_stats, pv_stats)
 
-    # 3. Adaptation pour l'entraînement ML
-    # Renommer la variable cible pour qu'elle corresponde à ce qu'attend LightGBM
-    stats_laf = stats_laf.rename(columns={'taux_irregularite': 'fraud_score'})
+    cache.set(cache_key, unified)
+    return unified
 
-    if stats_laf.empty:
-        raise ValueError("❌ Erreur : Les statistiques LAF sont vides. Vérifie tes fichiers CSV.")
 
-    # Extraire stop_id_dep et stop_id_arr depuis ton 'troncon_id' (format origin_dest_hour)
-    stats_laf[['stop_id_dep', 'stop_id_arr', 'dep_hour_laf']] = stats_laf['troncon_id'].str.split('_', expand=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAPE 3 : MERGE GTFS × LAF [CACHE L2]
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Agréger le score moyen au niveau de la paire (Origine, Destination) pour
-    # éviter de multiplier les lignes lors de la jointure avec le GTFS.
-    stats_laf_agg = stats_laf.groupby(['stop_id_dep', 'stop_id_arr'], as_index=False)['fraud_score'].mean()
+def _build_training_dataset(
+    cache: DataCache,
+    troncons_gtfs: pd.DataFrame,
+    unified_laf_stats: pd.DataFrame,
+    gtfs_paths: list[Path],
+    laf_paths: list[Path],
+    force_recompute: bool = False,
+) -> pd.DataFrame:
+    """
+    Joint les tronçons GTFS avec les stats LAF unifiées.
 
-    # 4. Fusion (Jointure Interne)
-    df_train = pd.merge(
+    Retourne df_merged : tronçons avec colonnes brutes (nb_controles,
+    nb_pv, pv_intensity, fraud_score...) mais PAS encore les features
+    hist_* — celles-ci seront calculées après le split dans
+    _build_features_and_split().
+
+    Jointure INNER : ne garde que les tronçons GTFS avec historique LAF.
+    """
+    all_paths = sorted(set(gtfs_paths + laf_paths))
+    cache_key = cache.make_key("training_dataset", all_paths)
+
+    if not force_recompute:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    print("\n🔗 MERGE — Jointure GTFS × LAF...")
+
+    # Extraire stop_id_dep / stop_id_arr depuis le troncon_id
+    split = unified_laf_stats["troncon_id"].str.split("_", expand=True)
+    if split.shape[1] < 3:
+        raise ValueError(
+            "❌ Impossible de parser troncon_id. "
+            "Format attendu : 'origin_uic_dest_uic_hour' (3 parties séparées par '_')."
+        )
+    unified_laf_stats = unified_laf_stats.copy()
+    unified_laf_stats["stop_id_dep"] = split[0]
+    unified_laf_stats["stop_id_arr"] = split[1]
+
+    # Agrégation au niveau O/D (les features hist_* seront calculées après)
+    numeric_sum_cols  = ["nb_controles", "nb_irregularites", "nb_pv",
+                         "nb_pv_tariff", "nb_pv_non_tariff"]
+    numeric_mean_cols = ["fraud_score", "pv_intensity", "pct_pv_tariff",
+                         "montant_moyen_pv_cents"]
+
+    sum_cols_present  = [c for c in numeric_sum_cols  if c in unified_laf_stats.columns]
+    mean_cols_present = [c for c in numeric_mean_cols if c in unified_laf_stats.columns]
+
+    agg_dict = {c: "sum"  for c in sum_cols_present}
+    agg_dict.update({c: "mean" for c in mean_cols_present})
+
+    stats_od = (
+        unified_laf_stats
+        .groupby(["stop_id_dep", "stop_id_arr"], as_index=False)
+        .agg(agg_dict)
+    )
+
+    # Recalculer le fraud_score agrégé à partir des sommes
+    if "nb_controles" in stats_od.columns and "nb_pv" in stats_od.columns:
+        denom = (stats_od["nb_controles"] + stats_od["nb_pv"]).replace(0, float("nan"))
+        stats_od["fraud_score"] = (
+            (stats_od.get("nb_irregularites", 0) + stats_od["nb_pv"]) / denom
+        ).fillna(0.0).round(4)
+
+    print(f"   {len(stats_od):,} paires O/D avec historique LAF.")
+
+    df_merged = pd.merge(
         troncons_gtfs,
-        stats_laf_agg[['stop_id_dep', 'stop_id_arr', 'fraud_score']],
-        on=['stop_id_dep', 'stop_id_arr'],
-        how='inner'
+        stats_od,
+        on=["stop_id_dep", "stop_id_arr"],
+        how="inner",
     )
 
-    if df_train.empty:
-        raise ValueError("❌ Erreur : Le dataset d'entraînement est vide après la fusion GTFS/LAF.")
+    if df_merged.empty:
+        raise ValueError(
+            "❌ Dataset vide après merge GTFS × LAF.\n"
+            "Cause probable : les codes UIC dans les fichiers LAF ne correspondent "
+            "pas aux stop_id nettoyés du GTFS (format attendu : 8 chiffres).\n"
+            "Vérifie que GTFSPreprocessor.clean_stop_id() produit bien des UIC "
+            "au même format que ticket_travelInformation_origin_uicCode dans les SC/CC."
+        )
 
-    print(f"✅ Données prêtes : {len(df_train)} tronçons historiques croisés trouvés.")
-    return df_train
+    coverage = len(df_merged["stop_id_dep"].unique())
+    print(
+        f"   ✅ {len(df_merged):,} tronçons avec historique LAF "
+        f"({coverage:,} gares de départ couvertes)."
+    )
+
+    cache.set(cache_key, df_merged)
+    return df_merged
 
 
-def extract_features(df_train: pd.DataFrame) -> pd.DataFrame:
-    """Passe les données dans le pipeline de features et le sauvegarde."""
-    print("⚙️ 2/4 - Création et apprentissage des Features...")
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAPES 4+5 : SPLIT D'ABORD, FEATURES ENSUITE
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # ATTENTION: Ici, pas de crochets parasites, c'est du Python pur !
+def _split_then_build_features(
+    df_merged: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Effectue le split train/test SUR LES DONNÉES BRUTES,
+    puis construit les features en fittant le pipeline UNIQUEMENT sur le train.
+
+    POURQUOI CET ORDRE EST CRITIQUE (anti-leakage temporel) :
+        HistoricalFeatureTransformer.fit() calcule les valeurs de fallback
+        (moyennes globales) et remplit le dictionnaire de lookup O/D.
+        Si fit() est appelé sur df_COMPLET (train + test), les tronçons
+        du test influencent les valeurs de fallback → leakage.
+
+        Ordre correct :
+            1. train_test_split(df_merged)        ← lignes brutes, sans hist_*
+            2. pipeline.fit_transform(df_train)   ← fit sur train UNIQUEMENT
+            3. pipeline.transform(df_test)        ← transform sans fit sur test
+
+    Retourne :
+        (df_train_features, df_test_features)
+        Deux DataFrames avec toutes les colonnes de features,
+        prêts pour LGBMScorer.train() et LGBMScorer.evaluate().
+    """
+    print("\n✂️  SPLIT — Division train/test sur données brutes...")
+
+    # ── Ajout de service_date AVANT le split ──────────────────────────────
+    # TemporalFeatureTransformer requiert cette colonne.
+    # En prod, cette colonne viendra des données GTFS (date de circulation réelle).
+    # En entraînement, on utilise date.today() comme proxy homogène.
+    # Note : tous les tronçons ont la même date → les features temporelles
+    # (is_vacances, is_jour_ferie, is_peak_hour) sont identiques pour tous.
+    # Quand service_date sera disponible par tronçon, supprimer cette ligne.
+    df_merged = df_merged.copy()
+    df_merged["service_date"] = date.today()
+
+    df_train_raw, df_test_raw = train_test_split(
+        df_merged, test_size=0.2, random_state=42
+    )
+    print(
+        f"   Train brut : {len(df_train_raw):,} tronçons | "
+        f"Test brut  : {len(df_test_raw):,} tronçons"
+    )
+
+    # ── Construction du pipeline et fit EXCLUSIVEMENT sur le train ────────
+    print("\n⚙️  FEATURES — Fit du pipeline sur le train uniquement...")
+
     pipeline = FeaturePipeline([
         TemporalFeatureTransformer(),
-        HistoricalFeatureTransformer()
+        HistoricalFeatureTransformer(),
     ])
 
-    # Apprentissage et transformation
-    df_features = pipeline.fit_transform(df_train)
+    # fit_transform sur le train : apprend les stats + transforme
+    df_train_features = pipeline.fit_transform(df_train_raw)
 
-    # Sauvegarde du pipeline pour l'API
-    saved_pipeline_path = pipeline.save()
-    print(f"✅ FeaturePipeline sauvegardé sous : {saved_pipeline_path}")
+    # transform seulement sur le test : applique sans apprendre
+    df_test_features = pipeline.transform(df_test_raw)
 
-    return df_features
+    saved_path = pipeline.save()
+    print(f"   ✅ FeaturePipeline sauvegardé → {saved_path}")
+
+    # Vérification sanité : le test ne doit avoir aucune stat apprise à partir de lui-même
+    _verify_no_leakage_between_splits(df_train_raw, df_test_raw)
+
+    print(
+        f"\n   Train features : {len(df_train_features):,} lignes × "
+        f"{len(df_train_features.columns)} colonnes"
+    )
+    print(
+        f"   Test  features : {len(df_test_features):,} lignes × "
+        f"{len(df_test_features.columns)} colonnes"
+    )
+
+    return df_train_features, df_test_features
 
 
-def train_and_evaluate(df_features: pd.DataFrame):
-    """Entraîne LightGBM, évalue ses performances et sauvegarde le modèle + métriques."""
-    print("🧠 3/4 - Séparation Train/Test, Entraînement et Évaluation...")
+def _verify_no_leakage_between_splits(
+    df_train_raw: pd.DataFrame,
+    df_test_raw: pd.DataFrame,
+) -> None:
+    """
+    Vérification sanité post-split.
 
-    # Séparation des données (80% apprentissage, 20% test)
-    df_train_split, df_test_split = train_test_split(df_features, test_size=0.2, random_state=42)
+    Vérifie que les paires O/D du test qui sont UNIQUES (jamais vues dans
+    le train) recevront bien les valeurs de fallback et non des valeurs
+    calculées à partir de leurs propres observations.
 
-    # Récupération des hyperparamètres depuis le YAML via config
+    Log uniquement — non bloquant.
+    """
+    if "stop_id_dep" not in df_train_raw.columns:
+        return
+
+    train_od = set(
+        zip(df_train_raw["stop_id_dep"].astype(str),
+            df_train_raw["stop_id_arr"].astype(str))
+    )
+    test_od = set(
+        zip(df_test_raw["stop_id_dep"].astype(str),
+            df_test_raw["stop_id_arr"].astype(str))
+    )
+    unseen = test_od - train_od
+    overlap = test_od & train_od
+
+    print(
+        f"\n   [Sanité split] Paires O/D train : {len(train_od):,} | "
+        f"test : {len(test_od):,}"
+    )
+    print(
+        f"   [Sanité split] Overlap train/test : {len(overlap):,} paires "
+        f"({100*len(overlap)/len(test_od):.1f}%)"
+    )
+    if unseen:
+        print(
+            f"   [Sanité split] {len(unseen):,} paires O/D jamais vues en train "
+            f"→ fallback appliqué (attendu en prod, OK)."
+        )
+    else:
+        print("   [Sanité split] ✅ Toutes les paires O/D test sont couvertes par le train.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ÉTAPE 6 : ENTRAÎNEMENT & ÉVALUATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _train_and_evaluate(
+    df_train_features: pd.DataFrame,
+    df_test_features: pd.DataFrame,
+) -> None:
+    """
+    Entraîne LightGBM, évalue les performances et sauvegarde le modèle.
+
+    Reçoit df_train et df_test DÉJÀ transformés (features calculées).
+    Le split a été fait en amont dans _split_then_build_features().
+    """
+    print("\n🧠 ENTRAÎNEMENT — LightGBM + évaluation...")
+    print(
+        f"   Train : {len(df_train_features):,} tronçons | "
+        f"Test  : {len(df_test_features):,} tronçons"
+    )
+
     lgbm_params = config.lgbm_params
-
-    # Instanciation et entraînement du modèle
     scorer = LGBMScorer(**lgbm_params)
-    scorer.train(df_train_split, target_col='fraud_score')
+    scorer.train(df_train_features, target_col="fraud_score")
 
-    # Évaluation sur le jeu de test
-    predictions_test = scorer.predict(df_test_split)
-    vraies_valeurs = df_test_split['fraud_score']
+    metrics = scorer.evaluate(df_test_features, target_col="fraud_score")
+    rmse = metrics["rmse"]
 
-    rmse = mean_squared_error(vraies_valeurs, predictions_test, squared=False)
-    print(f"📉 Performance du modèle (RMSE sur Test) : {rmse:.4f}")
+    print(f"\n   📉 RMSE sur Test : {rmse:.4f}")
+    print(
+        f"   Prédictions — "
+        f"min={scorer.predict(df_test_features).min():.3f}, "
+        f"max={scorer.predict(df_test_features).max():.3f}, "
+        f"moyenne={scorer.predict(df_test_features).mean():.3f}"
+    )
 
-    # Sauvegarde du modèle
-    saved_model_path = scorer.save()
-    print(f"✅ Modèle LightGBM sauvegardé sous : {saved_model_path}")
+    saved_model = scorer.save()
+    print(f"   ✅ Modèle LightGBM sauvegardé → {saved_model}")
 
-    # Tracking minimaliste (POC)
-    save_tracking_metrics(saved_model_path.parent, lgbm_params, rmse, len(df_train_split))
+    _save_tracking_metrics(
+        models_dir=saved_model.parent,
+        params=lgbm_params,
+        metrics=metrics,
+        train_size=len(df_train_features),
+        test_size=len(df_test_features),
+    )
 
 
-def save_tracking_metrics(models_dir: Path, params: dict, rmse: float, train_size: int):
-    """Gère l'historique des entraînements dans un fichier JSON."""
-    print("📊 4/4 - Sauvegarde des métriques de tracking...")
+def _save_tracking_metrics(
+    models_dir: Path,
+    params: dict,
+    metrics: dict,
+    train_size: int,
+    test_size: int,
+) -> None:
+    """Append les métriques du run courant dans training_history.json."""
+    print("\n📊 TRACKING — Sauvegarde des métriques...")
 
     run_metrics = {
-        "date": datetime.now().isoformat(),
-        "lgbm_params": params,
-        "rmse_test": rmse,
-        "nb_troncons_train": train_size
+        "date":               datetime.now().isoformat(),
+        "lgbm_params":        params,
+        "rmse_test":          metrics["rmse"],
+        "mae_test":           metrics.get("mae"),
+        "r2_test":            metrics.get("r2"),
+        "spearman_rho_test":  metrics.get("spearman_rho"),
+        "nb_troncons_train":  train_size,
+        "nb_troncons_test":   test_size,
     }
 
     metrics_file = models_dir / "training_history.json"
-
     history = []
     if metrics_file.exists():
-        with open(metrics_file, "r", encoding="utf-8") as f:
-            try:
+        try:
+            with open(metrics_file, "r", encoding="utf-8") as f:
                 history = json.load(f)
-            except json.JSONDecodeError:
-                pass  # Fichier corrompu ou vide, on repart de zéro
+        except Exception:
+            print("   ⚠️  training_history.json corrompu — réinitialisé.")
 
     history.append(run_metrics)
-
+    models_dir.mkdir(parents=True, exist_ok=True)
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=4)
 
-    print(f"✅ Tracking sauvegardé dans {metrics_file}")
+    print(f"   ✅ Tracking sauvegardé → {metrics_file} ({len(history)} runs)")
 
 
-def main():
-    """Point d'entrée principal du script."""
-    print("\n" + "=" * 50)
-    print("🚀 DÉMARRAGE DE L'ENTRAÎNEMENT DU MODÈLE SAD-LAF")
-    print("=" * 50 + "\n")
+# ─────────────────────────────────────────────────────────────────────────────
+# POINT D'ENTRÉE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Entraînement du modèle SAD-LAF",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemples :
+  python services/ml_engine/train.py
+      → Utilise les caches existants (rapide si déjà calculé)
+
+  python services/ml_engine/train.py --force-recompute-laf
+      → Recalcule les stats LAF (nouvelle livraison de données)
+
+  python services/ml_engine/train.py --force-recompute-all
+      → Tout recalculer depuis zéro (~30min)
+        """,
+    )
+    parser.add_argument(
+        "--force-recompute-laf",
+        action="store_true",
+        help="Invalide le cache LAF (L1) et recalcule les stats SC+CC+PV.",
+    )
+    parser.add_argument(
+        "--force-recompute-all",
+        action="store_true",
+        help="Invalide tous les caches (L1 + L2) et recalcule tout.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    print("\n" + "=" * 60)
+    print("🚀  DÉMARRAGE — SAD-LAF Model Training v2 (anti-leakage)")
+    print("=" * 60)
+
+    force_laf = args.force_recompute_laf or args.force_recompute_all
+    force_all = args.force_recompute_all
+
+    if force_laf:
+        print("\n⚠️  --force-recompute-laf : recalcul des stats LAF forcé.")
+    if force_all:
+        print("⚠️  --force-recompute-all  : recalcul complet forcé.")
+
+    cache    = DataCache(config.PROCESSED_DIR)
+    loader   = LAFLoader()
+    preprocessor = LAFPreprocessor()
 
     try:
-        # 1. Préparation
-        df_train = load_and_prepare_data()
+        # 1. GTFS
+        troncons_gtfs = _load_gtfs()
+        gtfs_dir = config.GTFS_DIR
+        gtfs_paths = sorted(gtfs_dir.glob("*.txt")) if gtfs_dir.exists() else []
 
-        # 2. Features
-        df_features = extract_features(df_train)
+        # 2. LAF stats [CACHE L1]
+        unified_laf = _build_laf_unified_stats(
+            cache, loader, preprocessor,
+            force_recompute=force_laf,
+        )
 
-        # 3. Entraînement & Évaluation & Tracking
-        train_and_evaluate(df_features)
+        # 3. Merge [CACHE L2] → données brutes (sans hist_* features)
+        laf_paths = loader.get_all_laf_paths()
+        df_merged = _build_training_dataset(
+            cache, troncons_gtfs, unified_laf,
+            gtfs_paths=gtfs_paths,
+            laf_paths=laf_paths,
+            force_recompute=force_all,
+        )
 
-        print("\n🎉 ENTRAÎNEMENT TERMINÉ AVEC SUCCÈS !")
-        print("👉 Les fichiers .joblib sont prêts à être consommés par l'API.")
+        # 4+5. Split PUIS features (ordre anti-leakage)
+        df_train_features, df_test_features = _split_then_build_features(df_merged)
+
+        # 6. Entraînement
+        _train_and_evaluate(df_train_features, df_test_features)
+
+        print("\n" + "=" * 60)
+        print("🎉  ENTRAÎNEMENT TERMINÉ AVEC SUCCÈS !")
+        print("   Les fichiers .joblib sont prêts pour l'API.")
+        print("=" * 60 + "\n")
 
     except Exception as e:
-        print(f"\n❌ Erreur fatale lors de l'entraînement : {str(e)}")
+        print(f"\n❌  Erreur fatale : {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
