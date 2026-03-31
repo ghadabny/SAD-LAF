@@ -311,9 +311,90 @@ def _build_training_dataset(
 # ─────────────────────────────────────────────────────────────────────────────
 # ÉTAPES 4+5 : SPLIT D'ABORD, FEATURES ENSUITE
 # ─────────────────────────────────────────────────────────────────────────────
+def _attach_service_dates(
+    df_merged: pd.DataFrame,
+    calendar_dates: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Injecte la vraie date de circulation sur chaque tronçon du dataset.
+
+    Principe :
+        GTFS calendar_dates contient (service_id, date, exception_type=1)
+        pour chaque jour où chaque service circule.
+        df_merged contient service_id (hérité des trips GTFS).
+        On joint les deux sur service_id pour obtenir la vraie date
+        de chaque tronçon.
+
+    Gestion des ambiguïtés :
+        Un service peut circuler plusieurs jours différents sur la période
+        GTFS (~151 jours). On garde UNE date représentative par service_id
+        via groupby + mode (date la plus fréquente) pour éviter
+        la multiplication des lignes lors du merge.
+        Si un service n'a aucune date dans calendar_dates (cas rare),
+        on utilise date.today() comme fallback (comportement dégradé
+        explicitement loggué).
+
+    Paramètres :
+        df_merged        : dataset GTFS × LAF, doit contenir 'service_id'
+        calendar_dates   : table raw de GTFSLoader.load_calendar_dates()
+                           Colonnes requises : service_id, date, exception_type
+
+    Retourne :
+        df_merged avec colonne 'service_date' (type datetime.date) ajoutée.
+    """
+    from datetime import date as date_type
+
+    df = df_merged.copy()
+
+    # Filtrer uniquement les jours de circulation (exception_type=1)
+    active = calendar_dates[calendar_dates["exception_type"] == 1].copy()
+
+    if active.empty:
+        print(
+            "[train] ⚠️  calendar_dates vide ou pas de service actif. "
+            "Fallback date.today() — features temporelles dégradées."
+        )
+        df["service_date"] = date_type.today()
+        return df
+
+    # Convertir la colonne date (int YYYYMMDD → date Python)
+    active = active.copy()
+    active["service_date"] = pd.to_datetime(
+        active["date"].astype(str), format="%Y%m%d"
+    ).dt.date
+
+    # Date représentative par service_id : on prend la plus fréquente (mode)
+    # Si un service a 45 lundis et 32 samedis, on prend le lundi.
+    # Cela préserve la distribution calendaire réelle de la majorité des trips.
+    service_date_map = (
+        active.groupby("service_id")["service_date"]
+        .agg(lambda x: x.mode().iloc[0])
+        .reset_index()
+    )
+
+    n_before = len(df)
+    df = df.merge(service_date_map, on="service_id", how="left")
+
+    # Fallback pour les service_id sans entrée dans calendar_dates
+    n_missing = df["service_date"].isna().sum()
+    if n_missing > 0:
+        print(
+            f"[train] ⚠️  {n_missing:,} tronçons sans date GTFS "
+            f"→ fallback date.today() appliqué."
+        )
+        df["service_date"] = df["service_date"].fillna(date_type.today())
+
+    print(
+        f"[train] ✅ service_date injectée sur {n_before:,} tronçons "
+        f"({active['service_date'].nunique()} dates distinctes dans le dataset)."
+    )
+    return df
+
+
 
 def _split_then_build_features(
     df_merged: pd.DataFrame,
+    gtfs_calendar_dates: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Effectue le split train/test SUR LES DONNÉES BRUTES,
@@ -334,8 +415,23 @@ def _split_then_build_features(
     # reçoivent date.today(), ce qui neutralise les features temporelles
     # calendaires (is_vacances, is_jour_ferie, is_peak_hour) puisqu'elles
     # sont identiques pour tous les tronçons du dataset d'entraînement.
-    df_merged = df_merged.copy()
-    df_merged["service_date"] = date.today()
+    # ── Propagation de service_date depuis calendar_dates ────────────────
+    # CORRECTIF anti-leakage temporel (remplacement de date.today()).
+    #
+    # Problème précédent :
+    #     df_merged["service_date"] = date.today()
+    #     → Tous les tronçons recevaient la même date (aujourd'hui).
+    #     → is_vacances, is_jour_ferie, is_peak_hour étaient identiques
+    #       pour TOUS les tronçons → LightGBM ne pouvait pas apprendre
+    #       l'effet calendaire.
+    #
+    # Correctif :
+    #     Jointure calendar_dates × service_id pour récupérer la vraie
+    #     date de circulation de chaque trip GTFS.
+    #     Le dataset d'entraînement contient maintenant des dates réelles
+    #     réparties sur ~151 jours → les features temporelles varient
+    #     correctement entre les tronçons.
+    df_merged = _attach_service_dates(df_merged, gtfs_calendar_dates)
 
     df_train_raw, df_test_raw = train_test_split(
         df_merged, test_size=0.2, random_state=42
@@ -571,7 +667,10 @@ def main() -> None:
         )
 
         # 4+5. Split PUIS features (ordre anti-leakage)
-        df_train_features, df_test_features = _split_then_build_features(df_merged)
+        gtfs_calendar_dates = GTFSLoader().load_calendar_dates()
+        df_train_features, df_test_features = _split_then_build_features(
+            df_merged, gtfs_calendar_dates
+        )
 
         # 6. Entraînement
         _train_and_evaluate(df_train_features, df_test_features)
