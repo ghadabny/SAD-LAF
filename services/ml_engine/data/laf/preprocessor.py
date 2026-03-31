@@ -12,42 +12,32 @@ class LAFPreprocessor:
 
     Trois opérations principales :
         1. Nettoyage des DataFrames bruts (CC/SC, PV)
-           - Suppression des lignes avec données critiques manquantes
-           - Parsing des colonnes datetime
-           - Construction du troncon_id (clé d'agrégation ML)
-           - Construction du gtfs_join_key (clé de jointure avec le GTFS)
-
-        2. Agrégation par tronçon
-           - build_troncon_stats(cc_clean)  → nb_controles, nb_irregularites
-           - build_pv_stats(pv_clean)       → nb_pv, types, montants
-
+        2. Agrégation par tronçon (build_troncon_stats, build_pv_stats)
         3. Unification CC/SC + PV (build_unified_stats)
-           - Fusionne les deux tables d'agrégats
-           - Calcule le fraud_score unifié
+
+    SOLID — principe I (refactoring) :
+        build_unified_stats() calculait fraud_score, pv_intensity et
+        pct_pv_tariff dans un bloc monolithique difficile à tester
+        et à faire évoluer indépendamment.
+        Ces trois calculs sont maintenant délégués à des méthodes privées :
+            _compute_fraud_score()
+            _compute_pv_intensity()
+            _compute_pct_pv_tariff()
+        build_unified_stats() orchestre uniquement la jointure et les appels.
 
     ── Définition du troncon_id ──────────────────────────────────────────────
         Format : "{origin_uic}_{dest_uic}_{dep_hour}"
-        Exemple : "87212027_87214007_8" = Strasbourg→Sélestat entre 8h et 9h
+        Exemple : "87212027_87214007_8"
 
     ── Définition du fraud_score unifié ─────────────────────────────────────
         fraud_score = (nb_irregularites + nb_pv) / (nb_controles + nb_pv)
-
-    Usage :
-        preprocessor = LAFPreprocessor()
-        cc_clean  = preprocessor.clean_cc(loader.load_cc())
-        pv_clean  = preprocessor.clean_pv(loader.load_pv())
-        cc_stats  = preprocessor.build_troncon_stats(cc_clean)
-        pv_stats  = preprocessor.build_pv_stats(pv_clean)
-        unified   = preprocessor.build_unified_stats(cc_stats, pv_stats)
     """
 
-    # ── Colonnes datetime à parser dans CC/SC ────────────────────────────────
     _CC_DATETIME_COLS: list[str] = [
         "verifiedTickets_verificationDateTime",
         "ticket_travelInformation_departureDateTime",
     ]
 
-    # ── Colonnes critiques pour qu'un contrôle CC soit exploitable ───────────
     _CC_REQUIRED: list[str] = [
         "ticket_travelInformation_origin_uicCode",
         "ticket_travelInformation_destination_uicCode",
@@ -55,20 +45,19 @@ class LAFPreprocessor:
         "verifiedTickets_verificationStatus",
     ]
 
-    # ── Vrais statuts d'irrégularité ─────────────────────────────────────────
     STATUTS_IRREGULIERS: frozenset[str] = frozenset({"REFUSED"})
+
+    # ── Interface publique ────────────────────────────────────────────────────
 
     def clean_cc(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Nettoie le DataFrame CC/SC brut (sortie de LAFLoader.load_cc() ou chunks SC).
-
-        CC et SC ont exactement le même schéma de colonnes.
+        Nettoie le DataFrame CC/SC brut.
 
         Opérations :
             1. Copie défensive
             2. Suppression des lignes avec colonnes critiques manquantes
-            3. Parsing des colonnes datetime (gère DD/MM/YYYY et YYYY-MM-DD)
-            4. Suppression des lignes dont le parsing datetime a échoué
+            3. Parsing datetime (gère DD/MM/YYYY et YYYY-MM-DD)
+            4. Suppression des lignes dont le parsing a échoué
             5. Construction du troncon_id
             6. Construction du gtfs_join_key
         """
@@ -76,12 +65,10 @@ class LAFPreprocessor:
             return df.copy()
 
         result = df.copy()
-        avant = len(result)
+        avant  = len(result)
 
-        cols_requises_presentes = [
-            c for c in self._CC_REQUIRED if c in result.columns
-        ]
-        result = result.dropna(subset=cols_requises_presentes)
+        cols_presentes = [c for c in self._CC_REQUIRED if c in result.columns]
+        result = result.dropna(subset=cols_presentes)
         supprimees = avant - len(result)
         if supprimees > 0:
             print(
@@ -117,11 +104,8 @@ class LAFPreprocessor:
 
     def clean_pv(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Nettoie le DataFrame PV brut (sortie de LAFLoader.load_pv()).
-
-        Chaque ligne = une fraude constatée.
+        Nettoie le DataFrame PV brut.
         L'heure de référence est penalties_issueDateTime.
-        UIC utilisés : penalties_origin_uicCode / penalties_destination_uicCode.
         """
         if df.empty:
             return df.copy()
@@ -141,7 +125,7 @@ class LAFPreprocessor:
             ]
             if c in result.columns
         ]
-        avant = len(result)
+        avant  = len(result)
         result = result.dropna(subset=cols_requises)
         supprimees = avant - len(result)
         if supprimees > 0:
@@ -172,11 +156,8 @@ class LAFPreprocessor:
         """
         Agrège les données CC/SC nettoyées par troncon_id.
 
-        Produit :
-            nb_controles         : nombre total de vérifications
-            nb_irregularites     : nombre de REFUSED constatés
-            taux_irregularite    : nb_irregularites / nb_controles ∈ [0, 1]
-            derniere_date_controle : date du dernier contrôle
+        Produit : nb_controles, nb_irregularites, taux_irregularite,
+                  derniere_date_controle
         """
         if cc_clean.empty or "troncon_id" not in cc_clean.columns:
             print("[LAFPreprocessor] CC vide ou sans troncon_id — stats vides.")
@@ -220,11 +201,7 @@ class LAFPreprocessor:
         """
         Agrège les données PV nettoyées par troncon_id.
 
-        Produit :
-            nb_pv                  : nombre total de PV
-            nb_pv_tariff           : PV tarifaires (fraude sans titre)
-            nb_pv_non_tariff       : PV comportementaux
-            montant_moyen_pv_cents : montant moyen (proxy de gravité)
+        Produit : nb_pv, nb_pv_tariff, nb_pv_non_tariff, montant_moyen_pv_cents
         """
         if pv_clean.empty or "troncon_id" not in pv_clean.columns:
             print("[LAFPreprocessor] PV vide ou sans troncon_id — stats vides.")
@@ -235,7 +212,7 @@ class LAFPreprocessor:
 
         pv = pv_clean.copy()
 
-        offence = pv.get("penalties_offenceType", pd.Series(dtype=str))
+        offence           = pv.get("penalties_offenceType", pd.Series(dtype=str))
         pv["is_tariff"]     = offence.str.upper().eq("TARIFF")
         pv["is_non_tariff"] = ~offence.str.upper().eq("TARIFF") & offence.notna()
 
@@ -251,15 +228,15 @@ class LAFPreprocessor:
             pv
             .groupby("troncon_id", as_index=False)
             .agg(
-                nb_pv=(              "troncon_id",          "count"),
-                nb_pv_tariff=(       "is_tariff",           "sum"),
-                nb_pv_non_tariff=(   "is_non_tariff",       "sum"),
-                montant_moyen_pv_cents=("montant_total_cents", "mean"),
+                nb_pv=(                  "troncon_id",          "count"),
+                nb_pv_tariff=(           "is_tariff",           "sum"),
+                nb_pv_non_tariff=(       "is_non_tariff",       "sum"),
+                montant_moyen_pv_cents=( "montant_total_cents", "mean"),
             )
         )
 
-        stats["nb_pv_tariff"]          = stats["nb_pv_tariff"].astype(int)
-        stats["nb_pv_non_tariff"]      = stats["nb_pv_non_tariff"].astype(int)
+        stats["nb_pv_tariff"]           = stats["nb_pv_tariff"].astype(int)
+        stats["nb_pv_non_tariff"]       = stats["nb_pv_non_tariff"].astype(int)
         stats["montant_moyen_pv_cents"] = stats["montant_moyen_pv_cents"].round(0)
 
         print(
@@ -275,19 +252,16 @@ class LAFPreprocessor:
         pv_stats: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Fusionne les stats CC/SC et PV pour produire un fraud_score unifié.
+        Fusionne les stats CC/SC et PV et calcule les features unifiées.
 
-        Formule :
-            fraud_score = (nb_irregularites + nb_pv) / (nb_controles + nb_pv)
+        Orchestration uniquement — les calculs sont délégués aux
+        méthodes privées _compute_fraud_score(), _compute_pv_intensity(),
+        _compute_pct_pv_tariff().
 
         Jointure outer :
             Tronçons CC/SC seulement → nb_pv = 0
-            Tronçons PV seulement    → nb_controles = 0, nb_irregularites = 0
+            Tronçons PV seulement    → nb_controles = 0
             Tronçons mixtes          → données complètes
-
-        Features supplémentaires produites :
-            pv_intensity   : nb_pv / nb_controles
-            pct_pv_tariff  : part des PV tarifaires / total PV
         """
         if pv_stats.empty or "troncon_id" not in pv_stats.columns:
             print(
@@ -308,6 +282,7 @@ class LAFPreprocessor:
             how="outer",
         )
 
+        # Remplissage des NaN issus du outer join
         for col in ["nb_controles", "nb_irregularites"]:
             if col not in merged.columns:
                 merged[col] = 0
@@ -322,20 +297,10 @@ class LAFPreprocessor:
             merged["montant_moyen_pv_cents"] = 0.0
         merged["montant_moyen_pv_cents"] = merged["montant_moyen_pv_cents"].fillna(0.0)
 
-        denom = (merged["nb_controles"] + merged["nb_pv"]).replace(0, np.nan)
-        merged["fraud_score"] = (
-            (merged["nb_irregularites"] + merged["nb_pv"]) / denom
-        ).fillna(0.0).round(4)
-
-        ctrl_nonzero = merged["nb_controles"].replace(0, np.nan)
-        merged["pv_intensity"] = (
-            merged["nb_pv"] / ctrl_nonzero
-        ).fillna(0.0).round(4)
-
-        pv_nonzero = merged["nb_pv"].replace(0, np.nan)
-        merged["pct_pv_tariff"] = (
-            merged["nb_pv_tariff"] / pv_nonzero
-        ).fillna(0.0).round(4)
+        # ── Calculs délégués aux méthodes privées ──────────────────────────────
+        merged["fraud_score"]   = self._compute_fraud_score(merged)
+        merged["pv_intensity"]  = self._compute_pv_intensity(merged)
+        merged["pct_pv_tariff"] = self._compute_pct_pv_tariff(merged)
 
         print(
             f"[LAFPreprocessor] Stats unifiées : "
@@ -346,6 +311,53 @@ class LAFPreprocessor:
         )
         return merged.reset_index(drop=True)
 
+    # ── Méthodes privées — calculs unitaires testables ────────────────────────
+
+    def _compute_fraud_score(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Calcule le fraud_score unifié CC/SC + PV.
+
+        Formule : (nb_irregularites + nb_pv) / (nb_controles + nb_pv)
+
+        Pourquoi cette formule ?
+            nb_pv est dans le numérateur (fraude constatée) ET le dénominateur
+            (chaque PV représente un voyageur contrôlé). Cela évite de compter
+            deux fois un fraudeur détecté à la fois en CC et en PV.
+
+        Retourne 0.0 si le dénominateur est nul (tronçon sans aucun contrôle).
+        """
+        denom = (df["nb_controles"] + df["nb_pv"]).replace(0, np.nan)
+        return (
+            (df["nb_irregularites"] + df["nb_pv"]) / denom
+        ).fillna(0.0).round(4)
+
+    def _compute_pv_intensity(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Calcule l'intensité PV : nb_pv / nb_controles.
+
+        Mesure la proportion de contrôles ayant abouti à un PV.
+        Retourne 0.0 si nb_controles = 0.
+
+        Note : pv_intensity est exclu de COLS_NON_FEATURES dans LGBMScorer
+        car sa corrélation avec fraud_score > 0.95 (composant quasi-direct).
+        Conservé ici pour des analyses exploratoires.
+        """
+        ctrl_nonzero = df["nb_controles"].replace(0, np.nan)
+        return (df["nb_pv"] / ctrl_nonzero).fillna(0.0).round(4)
+
+    def _compute_pct_pv_tariff(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Calcule la part des PV tarifaires : nb_pv_tariff / nb_pv.
+
+        Distingue fraude tarifaire (sans titre) vs comportementale.
+        Retourne 0.0 si nb_pv = 0.
+
+        Cette feature est utilisée dans HistoricalFeatureTransformer
+        via hist_pct_pv_tariff (agrégé par paire O/D).
+        """
+        pv_nonzero = df["nb_pv"].replace(0, np.nan)
+        return (df["nb_pv_tariff"] / pv_nonzero).fillna(0.0).round(4)
+
 
 # ── Fonctions utilitaires module-level ────────────────────────────────────────
 
@@ -353,55 +365,40 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
     """
     Parse une série de dates/datetimes en gérant les deux formats SNCF.
 
-    Stratégie vectorisée (×55 plus rapide que .apply() ligne par ligne) :
-        - Détection du format par regex sur toutes les valeurs non-nulles
-        - Parsing séparé des deux groupes (français DD/MM vs ISO YYYY-)
+    Stratégie vectorisée (×55 plus rapide que .apply()) :
+        - Détection du format par regex
+        - Parsing séparé des deux groupes
         - Fusion et réalignement sur l'index d'origine
 
     Formats gérés :
-        "25/03/2022 23:09"     → format français avec heure
+        "25/03/2022 23:09"     → format français
         "2022-03-25T22:09:15Z" → format ISO 8601 UTC
-
-    Note sur le timezone : les fichiers ISO avec suffixe "Z" (UTC) sont
-    convertis en datetime naive via tz_convert(None), sans décalage horaire.
     """
     if series.empty:
         return series.copy()
 
-    # 1. Isoler les valeurs non-nulles converties en string
     valid_series = series.dropna().astype(str).str.strip()
     if valid_series.empty:
         return pd.to_datetime(series, errors="coerce")
 
-    # 2. Détection vectorisée du format
     mask_french = valid_series.str.match(r"^\d{2}/\d{2}/\d{4}")
 
-    # 3. Parsing séparé par format
     french_parsed = pd.to_datetime(
-        valid_series[mask_french],
-        dayfirst=True,
-        errors="coerce",
+        valid_series[mask_french], dayfirst=True, errors="coerce",
     )
     iso_parsed = pd.to_datetime(
-        valid_series[~mask_french],
-        errors="coerce",
-        utc=False,
+        valid_series[~mask_french], errors="coerce", utc=False,
     )
 
-    # 4. Fusion des deux groupes (filtre les Series vides pour éviter les warnings)
     to_concat = [s for s in (french_parsed, iso_parsed) if not s.empty]
-    if to_concat:
-        parsed_all = pd.concat(to_concat)
-    else:
-        parsed_all = pd.Series(dtype="datetime64[ns]", index=valid_series.index)
+    parsed_all = (
+        pd.concat(to_concat)
+        if to_concat
+        else pd.Series(dtype="datetime64[ns]", index=valid_series.index)
+    )
 
-    # 5. Réalignement sur l'index d'origine (NaT pour les valeurs initialement nulles)
     result = parsed_all.reindex(series.index)
 
-    # 6. Suppression du timezone (tz_convert sur timezone-aware, no-op sinon)
-    # tz_convert(None) est correct ici car les fichiers ISO SNCF sont en UTC (suffixe Z).
-    # Contrairement à tz_localize(None), cette méthode ne lève pas TypeError
-    # sur les versions récentes de pandas.
     if hasattr(result, "dt") and result.dt.tz is not None:
         result = result.dt.tz_convert(None)
 
@@ -415,10 +412,7 @@ def _build_troncon_id(
 ) -> pd.Series:
     """
     Construit le troncon_id vectorisé : "{origin}_{dest}_{dep_hour}".
-
-    dep_datetime doit déjà être de type datetime64 (après _parse_datetime).
-
-    Exemple : "87212027_87214007_8" = Strasbourg→Sélestat entre 8h et 9h
+    Exemple : "87212027_87214007_8"
     """
     hour = dep_datetime.dt.hour.astype(str)
     return origin_uic.str.strip() + "_" + dest_uic.str.strip() + "_" + hour
@@ -429,17 +423,10 @@ def _build_gtfs_join_key(
     departure_date: pd.Series,
 ) -> pd.Series:
     """
-    Construit la clé de jointure avec les trips GTFS.
-
-    Format : "{course_courseNumber}_{YYYYMMDD}"
+    Construit la clé de jointure GTFS : "{course_courseNumber}_{YYYYMMDD}".
     Exemple : "117756_20220325"
-
-    Gère les deux formats de date des livraisons SNCF :
-        "25/03/2022" → "20220325"
-        "2022-03-25" → "20220325"
     """
     date_normalized = _parse_datetime(
         departure_date.astype(str)
     ).dt.strftime("%Y%m%d").fillna("UNKNOWN")
-
     return course_number.astype(str).str.strip() + "_" + date_normalized
