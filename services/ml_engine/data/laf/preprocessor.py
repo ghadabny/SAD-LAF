@@ -1,4 +1,6 @@
 # services/ml_engine/data/laf/preprocessor.py
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -27,42 +29,8 @@ class LAFPreprocessor:
         Format : "{origin_uic}_{dest_uic}_{dep_hour}"
         Exemple : "87212027_87214007_8" = Strasbourg→Sélestat entre 8h et 9h
 
-        Pourquoi inclure l'heure ?
-            Le taux de fraude varie selon le créneau horaire. Un train à 8h
-            (pendulaires) a un profil très différent du même tronçon à 14h.
-            L'heure est présente dans les données GTFS (dep_hour) et dans les
-            données LAF (ticket_travelInformation_departureDateTime).
-
-        Note importante : ce troncon_id est l'unité ML (agrégation sur
-        l'historique). La jointure avec les trips GTFS spécifiques utilise
-        gtfs_join_key = "{course_courseNumber}_{course_departureDate_YYYYMMDD}".
-
     ── Définition du fraud_score unifié ─────────────────────────────────────
         fraud_score = (nb_irregularites + nb_pv) / (nb_controles + nb_pv)
-
-        Intuition :
-            • Numérateur   : tous les signaux de fraude connus
-                              - nb_irregularites : REFUSED lors d'un scan
-                              - nb_pv            : verbalisés (sans titre ou comportement)
-            • Dénominateur : tous les "voyageurs observés" connus
-                              - nb_controles : scans effectués (présence certifiée)
-                              - nb_pv        : verbalisés sans scan préalable
-                              (on ajoute nb_pv pour ne pas gonfler artificiellement
-                               le taux quand il n'y a que des PV et peu de scans)
-
-        PV-only tronçons (nb_controles = 0) :
-            fraud_score = nb_pv / nb_pv = 1.0
-            → Signal fort mais sans dénominateur fiable.
-              Le modèle apprend à pondérer via nb_controles (feature explicite).
-              À terme : lissage bayésien (prior = taux moyen du réseau).
-
-    ── Colonnes UIC dans les CC/SC ──────────────────────────────────────────
-        station_uicCode : souvent null dans les CC (≈99% des lignes)
-        ticket_travelInformation_origin_uicCode : renseigné sur le titre
-        ticket_travelInformation_destination_uicCode : renseigné sur le titre
-
-        On utilise les colonnes du titre (origin/destination_uicCode),
-        pas station_uicCode, pour construire le troncon_id.
 
     Usage :
         preprocessor = LAFPreprocessor()
@@ -80,7 +48,6 @@ class LAFPreprocessor:
     ]
 
     # ── Colonnes critiques pour qu'un contrôle CC soit exploitable ───────────
-    # station_uicCode est EXCLU : quasi-systématiquement null dans les données réelles.
     _CC_REQUIRED: list[str] = [
         "ticket_travelInformation_origin_uicCode",
         "ticket_travelInformation_destination_uicCode",
@@ -89,26 +56,21 @@ class LAFPreprocessor:
     ]
 
     # ── Vrais statuts d'irrégularité ─────────────────────────────────────────
-    # Source : inspection des données réelles CC (Extract_DATA_GE_CC_*.csv)
-    # REFUSED = titre refusé → irrégularité
     STATUTS_IRREGULIERS: frozenset[str] = frozenset({"REFUSED"})
 
     def clean_cc(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Nettoie le DataFrame CC/SC brut (sortie de LAFLoader.load_cc() ou chunks SC).
 
-        CC et SC ont exactement le même schéma de colonnes — cette méthode
-        s'applique aux deux sans modification.
+        CC et SC ont exactement le même schéma de colonnes.
 
-        Opérations dans l'ordre :
+        Opérations :
             1. Copie défensive
             2. Suppression des lignes avec colonnes critiques manquantes
             3. Parsing des colonnes datetime (gère DD/MM/YYYY et YYYY-MM-DD)
             4. Suppression des lignes dont le parsing datetime a échoué
-            5. Construction du troncon_id (agrégation ML)
-            6. Construction du gtfs_join_key (jointure trips GTFS)
-
-        Retourne un DataFrame nettoyé. Si df est vide, retourne df vide.
+            5. Construction du troncon_id
+            6. Construction du gtfs_join_key
         """
         if df.empty:
             return df.copy()
@@ -116,7 +78,6 @@ class LAFPreprocessor:
         result = df.copy()
         avant = len(result)
 
-        # ── Filtrer les lignes avec données critiques manquantes ──────────────
         cols_requises_presentes = [
             c for c in self._CC_REQUIRED if c in result.columns
         ]
@@ -128,16 +89,10 @@ class LAFPreprocessor:
                 f"(données critiques manquantes)."
             )
 
-        # ── Parser les colonnes datetime ──────────────────────────────────────
-        # Les deux formats de date coexistent selon les livraisons :
-        #   "25/03/2022 23:09" (format français avec heure)
-        #   "2022-03-25T22:09:15Z" (format ISO 8601)
-        # _parse_datetime() gère les deux sans ambiguïté.
         for col in self._CC_DATETIME_COLS:
             if col in result.columns:
                 result[col] = _parse_datetime(result[col])
 
-        # Supprimer les lignes dont la datetime de départ n'a pas pu être parsée
         dep_col = "ticket_travelInformation_departureDateTime"
         if dep_col in result.columns:
             result = result.dropna(subset=[dep_col])
@@ -146,14 +101,12 @@ class LAFPreprocessor:
             print("[LAFPreprocessor] Aucune ligne CC valide après nettoyage.")
             return result.reset_index(drop=True)
 
-        # ── Construire troncon_id ─────────────────────────────────────────────
         result["troncon_id"] = _build_troncon_id(
             origin_uic=result["ticket_travelInformation_origin_uicCode"],
             dest_uic=result["ticket_travelInformation_destination_uicCode"],
             dep_datetime=result[dep_col],
         )
 
-        # ── Construire gtfs_join_key ──────────────────────────────────────────
         if "course_courseNumber" in result.columns and "course_departureDate" in result.columns:
             result["gtfs_join_key"] = _build_gtfs_join_key(
                 course_number=result["course_courseNumber"],
@@ -166,31 +119,20 @@ class LAFPreprocessor:
         """
         Nettoie le DataFrame PV brut (sortie de LAFLoader.load_pv()).
 
-        Particularité PV :
-            Chaque ligne = une fraude constatée ayant donné lieu à un PV.
-            Il n'y a pas de verifiedTickets_verificationStatus.
-            L'heure de référence est penalties_issueDateTime (heure du contrôle).
-
-        UIC utilisés pour le troncon_id :
-            penalties_origin_uicCode      → gare de montée du fraudeur
-            penalties_destination_uicCode → destination du fraudeur
-        Ces colonnes sont analogues aux origin/destination du titre dans CC/SC,
-        ce qui garantit la cohérence du troncon_id entre les deux sources.
-
-        Retourne un DataFrame nettoyé avec troncon_id et gtfs_join_key ajoutés.
+        Chaque ligne = une fraude constatée.
+        L'heure de référence est penalties_issueDateTime.
+        UIC utilisés : penalties_origin_uicCode / penalties_destination_uicCode.
         """
         if df.empty:
             return df.copy()
 
         result = df.copy()
 
-        # ── Parser issueDateTime ──────────────────────────────────────────────
         if "penalties_issueDateTime" in result.columns:
             result["penalties_issueDateTime"] = _parse_datetime(
                 result["penalties_issueDateTime"]
             )
 
-        # ── Filtrer les lignes invalides ──────────────────────────────────────
         cols_requises = [
             c for c in [
                 "penalties_origin_uicCode",
@@ -211,7 +153,6 @@ class LAFPreprocessor:
         if result.empty:
             return result.reset_index(drop=True)
 
-        # ── Construire troncon_id ─────────────────────────────────────────────
         if "penalties_issueDateTime" in result.columns:
             result["troncon_id"] = _build_troncon_id(
                 origin_uic=result["penalties_origin_uicCode"],
@@ -219,7 +160,6 @@ class LAFPreprocessor:
                 dep_datetime=result["penalties_issueDateTime"],
             )
 
-        # ── Construire gtfs_join_key ──────────────────────────────────────────
         if "course_courseNumber" in result.columns and "course_departureDate" in result.columns:
             result["gtfs_join_key"] = _build_gtfs_join_key(
                 course_number=result["course_courseNumber"],
@@ -232,17 +172,11 @@ class LAFPreprocessor:
         """
         Agrège les données CC/SC nettoyées par troncon_id.
 
-        Produit les features historiques de base :
-            nb_controles         : nombre total de vérifications sur ce tronçon
+        Produit :
+            nb_controles         : nombre total de vérifications
             nb_irregularites     : nombre de REFUSED constatés
             taux_irregularite    : nb_irregularites / nb_controles ∈ [0, 1]
             derniere_date_controle : date du dernier contrôle
-
-        Note : cette méthode produit des counts bruts.
-        Le taux_irregularite ici est PARTIEL (CC/SC seulement, sans PV).
-        Pour le fraud_score final incluant les PV → utiliser build_unified_stats().
-
-        Retourne une ligne par troncon_id unique. DataFrame vide si cc_clean vide.
         """
         if cc_clean.empty or "troncon_id" not in cc_clean.columns:
             print("[LAFPreprocessor] CC vide ou sans troncon_id — stats vides.")
@@ -286,15 +220,11 @@ class LAFPreprocessor:
         """
         Agrège les données PV nettoyées par troncon_id.
 
-        Chaque ligne PV = 1 fraude constatée.
         Produit :
-            nb_pv                : nombre total de PV sur ce tronçon
-            nb_pv_tariff         : PV pour fraude tarifaire (sans titre valide)
-            nb_pv_non_tariff     : PV pour fraude comportementale
-            montant_moyen_pv_cents : montant moyen du PV en centimes
-                                   (proxy de la gravité de la fraude)
-
-        Retourne DataFrame vide si pv_clean est vide.
+            nb_pv                  : nombre total de PV
+            nb_pv_tariff           : PV tarifaires (fraude sans titre)
+            nb_pv_non_tariff       : PV comportementaux
+            montant_moyen_pv_cents : montant moyen (proxy de gravité)
         """
         if pv_clean.empty or "troncon_id" not in pv_clean.columns:
             print("[LAFPreprocessor] PV vide ou sans troncon_id — stats vides.")
@@ -305,12 +235,10 @@ class LAFPreprocessor:
 
         pv = pv_clean.copy()
 
-        # Indicateurs booléens de type de fraude
         offence = pv.get("penalties_offenceType", pd.Series(dtype=str))
         pv["is_tariff"]     = offence.str.upper().eq("TARIFF")
         pv["is_non_tariff"] = ~offence.str.upper().eq("TARIFF") & offence.notna()
 
-        # Montant total du PV (perception + forfait) en centimes
         perception = pd.to_numeric(
             pv.get("penalties_perceptionFee_amountInCents", 0), errors="coerce"
         ).fillna(0)
@@ -323,15 +251,15 @@ class LAFPreprocessor:
             pv
             .groupby("troncon_id", as_index=False)
             .agg(
-                nb_pv=("troncon_id", "count"),
-                nb_pv_tariff=("is_tariff", "sum"),
-                nb_pv_non_tariff=("is_non_tariff", "sum"),
+                nb_pv=(              "troncon_id",          "count"),
+                nb_pv_tariff=(       "is_tariff",           "sum"),
+                nb_pv_non_tariff=(   "is_non_tariff",       "sum"),
                 montant_moyen_pv_cents=("montant_total_cents", "mean"),
             )
         )
 
-        stats["nb_pv_tariff"]     = stats["nb_pv_tariff"].astype(int)
-        stats["nb_pv_non_tariff"] = stats["nb_pv_non_tariff"].astype(int)
+        stats["nb_pv_tariff"]          = stats["nb_pv_tariff"].astype(int)
+        stats["nb_pv_non_tariff"]      = stats["nb_pv_non_tariff"].astype(int)
         stats["montant_moyen_pv_cents"] = stats["montant_moyen_pv_cents"].round(0)
 
         print(
@@ -352,45 +280,15 @@ class LAFPreprocessor:
         Formule :
             fraud_score = (nb_irregularites + nb_pv) / (nb_controles + nb_pv)
 
-        Pourquoi cette formule ?
-            ┌──────────────────┬──────────────────────────────────────────────┐
-            │ Source           │ Signification                                │
-            ├──────────────────┼──────────────────────────────────────────────┤
-            │ nb_irregularites │ Fraudes détectées parmi voyageurs scannés    │
-            │ nb_pv            │ Fraudes verbalisées hors scan                │
-            │ nb_controles     │ Total des scans (proxy fréquentation)        │
-            └──────────────────┴──────────────────────────────────────────────┘
-
-            En ajoutant nb_pv au numérateur ET au dénominateur :
-              - On ne gonfle pas artificiellement les taux des tronçons
-                avec peu de scans mais beaucoup de PV.
-              - Un tronçon avec 1000 scans, 0 refus et 50 PV donne :
-                fraud_score = (0 + 50) / (1000 + 50) ≈ 0.048
-                (cohérent : 5% de fraude détectée)
-
         Jointure outer :
-            Tronçons avec CC/SC seulement → nb_pv = 0 (rempli)
-            Tronçons avec PV seulement    → nb_controles = 0, nb_irregularites = 0
-            Tronçons mixtes               → données complètes
+            Tronçons CC/SC seulement → nb_pv = 0
+            Tronçons PV seulement    → nb_controles = 0, nb_irregularites = 0
+            Tronçons mixtes          → données complètes
 
-        Features supplémentaires produites (inputs pour LightGBM) :
-            pv_intensity       : nb_pv / nb_controles
-                                 Mesure la pression PV relative au volume de contrôle.
-                                 Élevé → le tronçon attire des fraudeurs sans titre.
-            pct_pv_tariff      : part des PV tarifaires sur total PV
-                                 Distingue fraude tarifaire (sans titre) vs comportementale.
-
-        Paramètres :
-            cc_sc_stats : sortie de build_troncon_stats() agrégée sur SC + CC
-            pv_stats    : sortie de build_pv_stats()
-                          Peut être un DataFrame vide → fraud_score = taux CC/SC seulement
-
-        Retourne un DataFrame avec une ligne par troncon_id unique.
+        Features supplémentaires produites :
+            pv_intensity   : nb_pv / nb_controles
+            pct_pv_tariff  : part des PV tarifaires / total PV
         """
-        # ── Gestion PV vide ───────────────────────────────────────────────────
-        # Si pas de données PV (fichier absent, aucun PV sur ce réseau...),
-        # on crée un DataFrame PV vide avec le bon schéma pour que la logique
-        # de fusion reste identique.
         if pv_stats.empty or "troncon_id" not in pv_stats.columns:
             print(
                 "[LAFPreprocessor] Aucun PV disponible — "
@@ -401,9 +299,6 @@ class LAFPreprocessor:
                 "nb_pv_non_tariff", "montant_moyen_pv_cents",
             ])
 
-        # ── Jointure outer CC/SC × PV ─────────────────────────────────────────
-        # On utilise outer pour conserver les tronçons qui n'ont que des CC/SC
-        # OU que des PV. Les NaN sont ensuite remplacés par 0.
         pv_cols = ["troncon_id", "nb_pv", "nb_pv_tariff",
                    "nb_pv_non_tariff", "montant_moyen_pv_cents"]
         merged = pd.merge(
@@ -413,7 +308,6 @@ class LAFPreprocessor:
             how="outer",
         )
 
-        # ── Remplissage des NaN ───────────────────────────────────────────────
         for col in ["nb_controles", "nb_irregularites"]:
             if col not in merged.columns:
                 merged[col] = 0
@@ -428,22 +322,16 @@ class LAFPreprocessor:
             merged["montant_moyen_pv_cents"] = 0.0
         merged["montant_moyen_pv_cents"] = merged["montant_moyen_pv_cents"].fillna(0.0)
 
-        # ── Calcul du fraud_score unifié ──────────────────────────────────────
         denom = (merged["nb_controles"] + merged["nb_pv"]).replace(0, np.nan)
         merged["fraud_score"] = (
             (merged["nb_irregularites"] + merged["nb_pv"]) / denom
         ).fillna(0.0).round(4)
 
-        # ── Features dérivées ─────────────────────────────────────────────────
-        # pv_intensity : pression PV relative au volume de contrôle
-        # → élevé = les fraudeurs sans titre sont nombreux par rapport aux scannés
         ctrl_nonzero = merged["nb_controles"].replace(0, np.nan)
         merged["pv_intensity"] = (
             merged["nb_pv"] / ctrl_nonzero
         ).fillna(0.0).round(4)
 
-        # pct_pv_tariff : proportion de fraude tarifaire (sans titre) parmi les PV
-        # → distingue la fraude intentionnelle (sans titre) de la fraude comportementale
         pv_nonzero = merged["nb_pv"].replace(0, np.nan)
         merged["pct_pv_tariff"] = (
             merged["nb_pv_tariff"] / pv_nonzero
@@ -519,6 +407,7 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
 
     return result
 
+
 def _build_troncon_id(
     origin_uic: pd.Series,
     dest_uic: pd.Series,
@@ -528,14 +417,8 @@ def _build_troncon_id(
     Construit le troncon_id vectorisé : "{origin}_{dest}_{dep_hour}".
 
     dep_datetime doit déjà être de type datetime64 (après _parse_datetime).
-    Vectorisé avec .str et .dt pour performance sur millions de lignes.
 
     Exemple : "87212027_87214007_8" = Strasbourg→Sélestat entre 8h et 9h
-
-    Cohérence avec le GTFS :
-        Les codes UIC ici sont les 8 chiffres présents dans les tickets.
-        Les stop_id GTFS sont nettoyés de leurs préfixes SNCF par GTFSPreprocessor.
-        Les deux doivent correspondre après nettoyage pour que la jointure fonctionne.
     """
     hour = dep_datetime.dt.hour.astype(str)
     return origin_uic.str.strip() + "_" + dest_uic.str.strip() + "_" + hour
@@ -552,15 +435,8 @@ def _build_gtfs_join_key(
     Exemple : "117756_20220325"
 
     Gère les deux formats de date des livraisons SNCF :
-        "25/03/2022"  → "20220325"  (format français)
-        "2022-03-25"  → "20220325"  (format ISO)
-
-    Utilise _parse_datetime() pour le parsing — même logique que clean_cc().
-
-    Pourquoi la clé de jointure est (numéro_train, date) ?
-        Un même numéro de train peut avoir des trajets différents selon la date
-        (variantes de desserte encodées dans des trip_id GTFS distincts).
-        La clé numéro_train seul serait ambiguë.
+        "25/03/2022" → "20220325"
+        "2022-03-25" → "20220325"
     """
     date_normalized = _parse_datetime(
         departure_date.astype(str)
