@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from scipy.stats import spearmanr
 
 from services.ml_engine.models.base import BaseScorer
 from shared.config import config
