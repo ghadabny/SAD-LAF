@@ -460,166 +460,62 @@ class LAFPreprocessor:
 
 
 # ── Fonctions utilitaires module-level ────────────────────────────────────────
-# Définies hors de la classe car elles n'ont pas d'état et sont
-# potentiellement utilisées par d'autres modules.
-"""
-def _parse_datetime(series: pd.Series) -> pd.Series:
-    """
-"""
-    Parse une série de dates/datetimes en gérant les deux formats SNCF.
-
-    Stratégie : détection du format par regex avant parsing.
-        - Format français  DD/MM/... → dayfirst=True  forcé
-        - Format ISO       YYYY-...  → format ISO standard
-    Évite le problème d'ambiguïté quand les deux formats coexistent
-    dans la même série (le fallback NaT ne détecte pas les mauvais parsings).
-    """
-"""
-    import re
-
-    FRENCH_PATTERN = re.compile(r"^\d{2}/\d{2}/\d{4}")
-
-    def _parse_single(val):
-        if pd.isna(val):
-            return pd.NaT
-        s = str(val).strip()
-        try:
-            if FRENCH_PATTERN.match(s):
-                return pd.to_datetime(s, dayfirst=True, errors="coerce")
-            else:
-                return pd.to_datetime(s, errors="coerce", utc=False)
-        except Exception:
-            return pd.NaT
-
-    parsed = series.apply(_parse_single)
-
-    # Supprimer le timezone si présent (évite les erreurs de comparaison)
-    if hasattr(parsed, "dt") and parsed.dt.tz is not None:
-        parsed = parsed.dt.tz_localize(None)
-
-    return parsed
-
-# ── Remplacement dans services/ml_engine/data/laf/preprocessor.py ────────────
-# Remplace UNIQUEMENT la fonction _parse_datetime() en bas du fichier.
-# Tout le reste (LAFPreprocessor, build_unified_stats, etc.) reste identique.
-#
-# AVANT : .apply() ligne par ligne sur 38M lignes → 5 heures
-# APRÈS : pd.to_datetime() vectorisé              → ~20 minutes
-#
-# Pourquoi l'ancienne version était si lente ?
-#   series.apply(lambda val: pd.to_datetime(val, ...))
-#   = boucle Python sur chaque ligne = 38_000_000 appels Python individuels
-#   = overhead interpréteur × 38M = catastrophe de performance
-#
-# Pourquoi la nouvelle version est rapide ?
-#   pd.to_datetime(series, ...) = opération vectorisée en C/numpy sur toute la série
-#   = 1 seul appel, pas de boucle Python
-#
-# Benchmark sur 500K lignes (1 chunk SC) :
-#   Ancienne version : ~220 secondes
-#   Nouvelle version : ~4 secondes
-#   Gain : ×55
-
-
-"""
-"""
-import re
-
-def _parse_datetime(series: pd.Series) -> pd.Series:
-
-    if series.empty:
-        return series.copy()
-
-    # ── Détection du format dominant ─────────────────────────────────────────
-    # On regarde la 1ère valeur non-nulle pour choisir la stratégie
-    first_valid = series.dropna().iloc[0] if not series.dropna().empty else None
-    is_french = (
-        first_valid is not None
-        and isinstance(first_valid, str)
-        and bool(re.match(r"^\d{2}/\d{2}/\d{4}", str(first_valid).strip()))
-    )
-
-    # ── Parsing vectorisé (une seule passe sur toute la série) ───────────────
-    if is_french:
-        # Format français : DD/MM/YYYY [HH:MM[:SS]]
-        result = pd.to_datetime(series, dayfirst=True, errors="coerce")
-    else:
-        # Format ISO : YYYY-MM-DD[THH:MM:SS[Z]]
-        result = pd.to_datetime(series, errors="coerce", utc=False)
-
-    # ── Rattrapage des valeurs qui ont échoué ─────────────────────────────────
-    # Certains fichiers mélangent les formats (rare mais possible).
-    # On tente le format alternatif sur les NaT restants qui avaient une valeur.
-    mask_failed = result.isna() & series.notna()
-    if mask_failed.sum() > 0:
-        alt_format = not is_french  # essaie l'autre format
-        if alt_format:
-            result[mask_failed] = pd.to_datetime(
-                series[mask_failed], dayfirst=True, errors="coerce"
-            )
-        else:
-            result[mask_failed] = pd.to_datetime(
-                series[mask_failed], errors="coerce", utc=False
-            )
-
-    # ── Suppression du timezone ───────────────────────────────────────────────
-    # Certains fichiers ISO ont "Z" (UTC). On convertit en naive datetime
-    # pour éviter les erreurs de comparaison mixed-timezone.
-    if hasattr(result, "dt") and result.dt.tz is not None:
-        result = result.dt.tz_localize(None)
-
-    return result
-"""
-
-import re
-import pandas as pd
-
 
 def _parse_datetime(series: pd.Series) -> pd.Series:
     """
     Parse une série de dates/datetimes en gérant les deux formats SNCF.
-    Vectorisé, rapide et sans FutureWarning.
+
+    Stratégie vectorisée (×55 plus rapide que .apply() ligne par ligne) :
+        - Détection du format par regex sur toutes les valeurs non-nulles
+        - Parsing séparé des deux groupes (français DD/MM vs ISO YYYY-)
+        - Fusion et réalignement sur l'index d'origine
+
+    Formats gérés :
+        "25/03/2022 23:09"     → format français avec heure
+        "2022-03-25T22:09:15Z" → format ISO 8601 UTC
+
+    Note sur le timezone : les fichiers ISO avec suffixe "Z" (UTC) sont
+    convertis en datetime naive via tz_convert(None), sans décalage horaire.
     """
     if series.empty:
         return series.copy()
 
-    # 1. On isole les valeurs non-nulles converties en string
+    # 1. Isoler les valeurs non-nulles converties en string
     valid_series = series.dropna().astype(str).str.strip()
-
     if valid_series.empty:
         return pd.to_datetime(series, errors="coerce")
 
-    # 2. Détection vectorisée (très rapide)
+    # 2. Détection vectorisée du format
     mask_french = valid_series.str.match(r"^\d{2}/\d{2}/\d{4}")
 
-    # 3. Parsing séparé
+    # 3. Parsing séparé par format
     french_parsed = pd.to_datetime(
         valid_series[mask_french],
         dayfirst=True,
-        errors="coerce"
+        errors="coerce",
     )
     iso_parsed = pd.to_datetime(
         valid_series[~mask_french],
         errors="coerce",
-        utc=False
+        utc=False,
     )
 
-    # 4. Fusion ultra-rapide sans le FutureWarning
-    # On filtre pour ne garder que les séries qui ne sont pas vides
+    # 4. Fusion des deux groupes (filtre les Series vides pour éviter les warnings)
     to_concat = [s for s in (french_parsed, iso_parsed) if not s.empty]
-
     if to_concat:
         parsed_all = pd.concat(to_concat)
     else:
-        # Sécurité au cas où (ex: que des valeurs bizarres non parsables)
-        parsed_all = pd.Series(dtype='datetime64[ns]', index=valid_series.index)
+        parsed_all = pd.Series(dtype="datetime64[ns]", index=valid_series.index)
 
-    # 5. Réalignement parfait sur l'index d'origine
+    # 5. Réalignement sur l'index d'origine (NaT pour les valeurs initialement nulles)
     result = parsed_all.reindex(series.index)
 
-    # 6. Suppression du timezone si "Z" (UTC) était présent
+    # 6. Suppression du timezone (tz_convert sur timezone-aware, no-op sinon)
+    # tz_convert(None) est correct ici car les fichiers ISO SNCF sont en UTC (suffixe Z).
+    # Contrairement à tz_localize(None), cette méthode ne lève pas TypeError
+    # sur les versions récentes de pandas.
     if hasattr(result, "dt") and result.dt.tz is not None:
-        result = result.dt.tz_localize(None)
+        result = result.dt.tz_convert(None)
 
     return result
 
