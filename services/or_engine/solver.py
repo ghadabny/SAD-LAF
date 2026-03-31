@@ -45,6 +45,7 @@ from services.ml_engine.data.gtfs.loader import GTFSLoader
 from services.ml_engine.data.gtfs.preprocessor import GTFSPreprocessor
 from services.or_engine.graph.builder import TimeExpandedGraphBuilder
 from services.or_engine.graph.transition import Arc, ArcType, Node
+from services.or_engine.optimizer.orienteering import OrienteeringOptimizer
 from shared.schemas import (
     PredictRequest,
     PredictResponse,
@@ -521,10 +522,12 @@ def run(
     inject_scores(graph, scores)
 
     # ── Étape 5 : Optimisation ────────────────────────────────────────────────
-    # TODO : remplacer _greedy_optimize par OrienteeringOptimizer (PuLP/CBC)
-    tournee = _greedy_optimize(
+    # Résolution MILP via OrienteeringOptimizer (PuLP/CBC).
+    # Fallback automatique vers greedy si PuLP n'est pas installé
+    # ou si CBC ne converge pas dans le time_limit.
+    optimizer = OrienteeringOptimizer(time_limit_seconds=30)
+    tournee   = optimizer.solve(
         graph=graph,
-        builder=builder,
         gare_depart_id=gare_depart_id,
         heure_depart_min=heure_depart_min,
         duree_max_minutes=duree_max_minutes,
