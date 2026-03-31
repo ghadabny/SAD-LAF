@@ -59,8 +59,21 @@ def load_test_data() -> pd.DataFrame:
     df_raw = pd.read_parquet(parquet_files[-1])
     print(f"[evaluate] {len(df_raw):,} tronçons chargés.")
 
-    from datetime import date
-    df_raw["service_date"] = date.today()
+    # ── Propagation de service_date (correctif date.today()) ─────────────
+    # On recharge calendar_dates depuis le GTFS pour obtenir les vraies
+    # dates de circulation, comme dans train.py.
+    from services.ml_engine.data.gtfs.loader import GTFSLoader as _GTFSLoader
+    from services.ml_engine.data.gtfs.preprocessor import GTFSPreprocessor as _Prep
+    from services.ml_engine.train import _attach_service_dates
+
+    try:
+        _calendar = _GTFSLoader().load_calendar_dates()
+        df_raw = _attach_service_dates(df_raw, _calendar)
+    except Exception as e:
+        from datetime import date
+        print(f"[evaluate] ⚠️  Impossible de charger calendar_dates ({e}). Fallback date.today().")
+        df_raw["service_date"] = date.today()
+
     pipeline = FeaturePipeline.load("feature_pipeline.joblib")
     df_features = pipeline.transform(df_raw)
 
