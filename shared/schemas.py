@@ -1,3 +1,21 @@
+"""
+shared/schemas.py — Schémas Pydantic partagés entre tous les services.
+
+Convention de nommage : suffixe "Schema" pour distinguer des classes métier.
+
+Structure des schémas par domaine :
+    GTFS         → TronconSchema, TronconScoreSchema
+    Graphe       → NodeSchema, ArcSchema, ArcTypeSchema
+    Optimisation → TourneeRequestSchema, TourneeSchema
+    ML API       → TronconInput, PredictRequest, PredictScoreItem, PredictResponse
+    GTFS-RT      → StopTimeUpdateSchema, TripUpdateSchema, ServiceAlertSchema
+    API          → HealthSchema, ErrorSchema, PredictResponseSchema, OptimizeResponseSchema
+
+Pourquoi Pydantic ?
+    Validation automatique des types à l'instanciation.
+    FastAPI l'utilise nativement comme types de paramètres et réponses.
+"""
+
 from datetime import date, datetime
 from enum import Enum
 from typing import Optional
@@ -5,21 +23,9 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-"""""
-Pourquoi Pydantic ?
-   Pydantic valide automatiquement les types à l'instanciation.
-   Si on crée TronconSchema(dep_minutes="pas_un_int"), Pydantic lève
-   une ValidationError claire au lieu d'un TypeError cryptique plus tard.
-
-   FastAPI utilise Pydantic nativement — ces schémas servent directement
-   comme types des paramètres et réponses des endpoints.
-
-   Convention : on suffixe tous les schémas avec "Schema" pour les
-   distinguer des classes métier (Node, Arc, etc.).
-
-"""
-
+# ─────────────────────────────────────────────────────────────────────────────
 # ENUMS
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ArcTypeSchema(str, Enum):
     """
@@ -32,7 +38,9 @@ class ArcTypeSchema(str, Enum):
     CORRESPONDANCE = "correspondance"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # GTFS — Tronçons
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TronconSchema(BaseModel):
     """
@@ -87,7 +95,9 @@ class TronconScoreSchema(TronconSchema):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Graphe temps-étendu — Nœuds et Arcs
+# ─────────────────────────────────────────────────────────────────────────────
 
 class NodeSchema(BaseModel):
     """
@@ -123,7 +133,9 @@ class ArcSchema(BaseModel):
     fraud_score:  float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Optimisation — Requête et Réponse
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TourneeRequestSchema(BaseModel):
     """
@@ -132,14 +144,6 @@ class TourneeRequestSchema(BaseModel):
     L'optimiseur ne sait rien des agents — il reçoit des contraintes
     opérationnelles et génère la meilleure tournée possible.
     L'affectation agent ↔ tournée est faite en dehors du système.
-
-    Paramètres :
-        gare_depart_id    : code UIC de la gare de départ (8 chiffres)
-        heure_depart_min  : heure de départ en minutes depuis minuit
-                            Ex: 08:30 → 510
-        duree_max_minutes : durée maximale de la tournée en minutes
-                            Par défaut : MAX_MISSION_DURATION_HOURS × 60
-        service_date      : date de la tournée
     """
     gare_depart_id:    str = Field(description="Code UIC 8 chiffres de la gare de départ")
     heure_depart_min:  int = Field(ge=0, le=1439, description="Heure de départ en minutes depuis minuit")
@@ -162,17 +166,6 @@ class TourneeSchema(BaseModel):
     Une tournée = une séquence d'arcs TRAIN et CORRESPONDANCE
     optimisée pour maximiser le score de fraude total
     sous contrainte de durée.
-
-    Attributs :
-        arcs          : séquence ordonnée des arcs de la tournée
-        score_total   : somme des fraud_score sur les arcs TRAIN uniquement
-                        (les arcs CORRESPONDANCE ne sont pas scorés)
-        duree_totale_minutes : durée réelle de la tournée
-        nb_trains     : nombre de trains contrôlés
-        gare_depart   : nœud de départ
-        gare_arrivee  : nœud d'arrivée (dernier arrêt de la tournée)
-        service_date  : date de la tournée
-        generated_at  : horodatage de génération
     """
     arcs:                  list[ArcSchema]
     score_total:           float = Field(ge=0.0, description="Somme des scores sur arcs TRAIN")
@@ -197,7 +190,9 @@ class TourneeSchema(BaseModel):
         ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # GTFS-RT — Temps réel
+# ─────────────────────────────────────────────────────────────────────────────
 
 class StopTimeUpdateSchema(BaseModel):
     """
@@ -234,9 +229,6 @@ class ServiceAlertSchema(BaseModel):
     """
     Alerte de service (suppression, perturbation).
     Issu du fichier service_alerts.json produit par RealtimeFetcher.
-
-    cause  : raison de la perturbation (STRIKE, TECHNICAL_PROBLEM, etc.)
-    effect : impact sur le service (NO_SERVICE, REDUCED_SERVICE, etc.)
     """
     alert_id:        str
     cause:           str
@@ -254,10 +246,7 @@ class ServiceAlertSchema(BaseModel):
 
 
 class RealtimeFeedSchema(BaseModel):
-    """
-    Contenu complet d'un fichier JSON produit par RealtimeFetcher.
-    Encapsule les métadonnées + les données du flux.
-    """
+    """Contenu complet d'un fichier JSON produit par RealtimeFetcher."""
     fetched_at: datetime
     source:     str
 
@@ -272,7 +261,9 @@ class ServiceAlertFeedSchema(RealtimeFeedSchema):
     alerts: list[ServiceAlertSchema] = Field(default_factory=list)
 
 
-# API — Réponses standardisées
+# ─────────────────────────────────────────────────────────────────────────────
+# API — Réponses standardisées (endpoints GTFS)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class HealthSchema(BaseModel):
     """Réponse du endpoint GET /health."""
@@ -281,11 +272,7 @@ class HealthSchema(BaseModel):
 
 
 class ErrorSchema(BaseModel):
-    """
-    Format standard des erreurs retournées par l'API.
-    Permet au client (Power Automate, front) de parser les erreurs
-    de façon cohérente.
-    """
+    """Format standard des erreurs retournées par l'API."""
     error:   str
     detail:  Optional[str] = None
     code:    int
@@ -293,8 +280,8 @@ class ErrorSchema(BaseModel):
 
 class PredictResponseSchema(BaseModel):
     """
-    Réponse du endpoint POST /predict.
-    Retourne les tronçons enrichis avec leurs scores de fraude.
+    Réponse du endpoint GET /predict.
+    Retourne les tronçons GTFS enrichis avec leurs scores de fraude.
     """
     troncons:     list[TronconScoreSchema]
     service_date: date
@@ -314,19 +301,116 @@ class OptimizeResponseSchema(BaseModel):
     optimized_at: datetime = Field(default_factory=datetime.now)
 
 
-# LAF — À définir quand les données arrivent
+# ─────────────────────────────────────────────────────────────────────────────
+# ML API — Scoring batch (Phase 1 : câblage post-entraînement)
+# ─────────────────────────────────────────────────────────────────────────────
 
-# TODO: LAFControleSchema
-#   À définir quand les données LAF seront reçues.
-#   Colonnes attendues (à confirmer) :
-#       - trip_id / train_number
-#       - date_controle
-#       - stop_id_dep / stop_id_arr (ou tronçon_id ?)
-#       - nb_voyageurs_controles
-#       - nb_irregularites
-#       - taux_fraude
-#       - agent_id (anonymisé ?)
-#
-# TODO: HistoricalFeatureSchema
-#   Features calculées depuis LAFControleSchema.
-#   Dépend du contenu exact des données LAF.
+class TronconInput(BaseModel):
+    """
+    Données brutes d'un tronçon envoyées au modèle ML pour prédiction.
+
+    Utilisé par l'OR Engine pour appeler POST /predict/batch avant l'optimisation.
+    Contient les colonnes minimales requises par le FeaturePipeline.
+
+    Colonnes requises par TemporalFeatureTransformer :
+        dep_minutes  → calcul de dep_hour, is_peak_hour, day_of_week…
+        service_date → calcul de is_weekend, is_vacances, is_jour_ferie…
+
+    Colonnes requises par HistoricalFeatureTransformer :
+        stop_id_dep, stop_id_arr → lookup du taux de fraude historique par O/D
+
+    Propagation de service_date depuis le GTFS :
+        La date n'est pas dans les tronçons bruts GTFS (elle vient de
+        calendar_dates via service_id). Elle est injectée dans le solver
+        depuis le contexte de la requête d'optimisation — voir solver.py,
+        fonction _build_predict_request().
+    """
+    trip_id:       str
+    train_number:  str
+    service_id:    str
+    stop_sequence: int = Field(ge=0, description="Position dans le trip (0-indexed)")
+
+    stop_id_dep:   str  = Field(description="Code UIC 8 chiffres de la gare de départ")
+    stop_name_dep: str  = Field(default="", description="Nom lisible (ex: Strasbourg)")
+    dep_minutes:   int  = Field(ge=0, description="Heure de départ en minutes depuis minuit")
+
+    stop_id_arr:   str  = Field(description="Code UIC 8 chiffres de la gare d'arrivée")
+    stop_name_arr: str  = Field(default="", description="Nom lisible (ex: Sélestat)")
+    arr_minutes:   int  = Field(ge=0, description="Heure d'arrivée en minutes depuis minuit")
+
+    duration_min:  int  = Field(gt=0, description="Durée du tronçon en minutes")
+
+    service_date:  date = Field(
+        description=(
+            "Date réelle de circulation du train. "
+            "Requise par TemporalFeatureTransformer pour calculer "
+            "is_weekend, is_vacances, is_jour_ferie, etc. "
+            "Propagée depuis le contexte GTFS (calendar_dates × service_id)."
+        )
+    )
+
+
+class PredictRequest(BaseModel):
+    """
+    Requête de scoring ML en batch.
+    Corps de POST /predict/batch — envoyé par l'OR Engine via httpx.
+
+    Exemple :
+        {
+            "troncons": [
+                {
+                    "trip_id": "TRIP_001",
+                    "train_number": "117756",
+                    "service_id": "000001",
+                    "stop_sequence": 0,
+                    "stop_id_dep": "87212027",
+                    "dep_minutes": 503,
+                    "stop_id_arr": "87214007",
+                    "arr_minutes": 532,
+                    "duration_min": 29,
+                    "service_date": "2024-09-02"
+                }
+            ]
+        }
+    """
+    troncons: list[TronconInput] = Field(
+        min_length=1,
+        description="Liste de tronçons à scorer — doit contenir au moins 1 élément.",
+    )
+
+
+class PredictScoreItem(BaseModel):
+    """
+    Score de fraude prédit par LightGBM pour un tronçon identifié.
+
+    Les champs trip_id + stop_id_dep + dep_minutes permettent à l'OR Engine
+    de faire la correspondance avec l'arc correct dans le graphe temps-étendu :
+
+        arc.trip_id           == item.trip_id
+        arc.source.stop_id    == item.stop_id_dep
+        arc.source.time_minutes == item.dep_minutes
+
+    Voir inject_scores() dans solver.py pour l'utilisation de cette clé.
+    """
+    trip_id:       str
+    stop_sequence: int  = Field(ge=0)
+    stop_id_dep:   str  = Field(description="Code UIC 8 chiffres — clé de jointure avec Arc.source")
+    dep_minutes:   int  = Field(ge=0, description="Heure de départ — clé de jointure avec Arc.source.time_minutes")
+    fraud_score:   float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Score de fraude prédit par LightGBM ∈ [0.0, 1.0]",
+    )
+
+
+class PredictResponse(BaseModel):
+    """
+    Réponse de l'endpoint POST /predict/batch.
+
+    Retourne exactement autant de scores qu'il y avait de tronçons en entrée
+    (même ordre garanti par l'implémentation de predict_batch).
+    """
+    scores:      list[PredictScoreItem]
+    scored_at:   datetime = Field(default_factory=datetime.now)
+    nb_troncons: int = Field(ge=0, description="Nombre de tronçons scorés")
