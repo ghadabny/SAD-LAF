@@ -46,7 +46,17 @@ class LAFLoader:
         all_paths = loader.get_all_laf_paths()   # pour le cache fingerprint
     """
 
-    # Colonnes exactes des fichiers réels (ordre extrait des headers CSV)
+    # ── Schémas de colonnes ──────────────────────────────────────────────────
+    # Colonnes extraites de l'en-tête réel des fichiers SNCF.
+    #
+    # SOLID — principe O : ces listes sont les seuls endroits à modifier si
+    # SNCF change le format de livraison. Toute la logique de lecture
+    # (load_cc, load_pv, load_sc) reste inchangée.
+    #
+    # Si une nouvelle source LAF est ajoutée (ex: PV2), on ajoute :
+    #   PV2_COLUMNS: list[str] = [...]
+    #   _UIC_COLUMNS_PV2: list[str] = [...]
+    # et une nouvelle méthode load_pv2(). Aucun code existant modifié.
     CC_COLUMNS: list[str] = [
         "course_companyCode",
         "course_courseNumber",
