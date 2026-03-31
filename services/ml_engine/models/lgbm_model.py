@@ -55,15 +55,15 @@ class LGBMScorer(BaseScorer):
     """
 
     # ── Colonnes exclues de l'entraînement ───────────────────────────────────
-    # Ces colonnes sont dans df_train mais ne doivent JAMAIS être des features.
-    # Règle : toute colonne qui est algébriquement dérivée de fraud_score.
+    # Règle : toute colonne qui est algébriquement dérivée de fraud_score,
+    # ou qui est un identifiant technique sans pouvoir prédictif.
     COLS_NON_FEATURES: frozenset[str] = frozenset({
         # Cible
         "fraud_score",
         # Composants directs de la cible
         "taux_irregularite",     # = nb_irregularites / nb_controles ≈ fraud_score
         "nb_irregularites",      # numérateur de fraud_score
-        # Identifiants techniques (pas prédictifs, créent du bruit)
+        # Identifiants techniques
         "trip_id",
         "train_number",
         "service_id",
@@ -74,9 +74,9 @@ class LGBMScorer(BaseScorer):
         "troncon_id",
         "gtfs_join_key",
         "service_date",
-        # Feature supprimée : ancienne version de HistoricalFeatureTransformer
+        # Feature supprimée (ancienne version HistoricalFeatureTransformer v1)
         "hist_fraud_score_segment",
-        # Autres agrégats source (déjà transformés en hist_* par le transformer)
+        # Agrégats source déjà transformés en hist_* par le transformer
         "derniere_date_controle",
         "dep_minute_of_day",     # redondant avec dep_hour
     })
@@ -84,13 +84,13 @@ class LGBMScorer(BaseScorer):
     def __init__(self, **kwargs):
         # Hyperparamètres par défaut pour la régression d'un taux ∈ [0, 1]
         self.params = {
-            "objective":    "regression",
-            "metric":       "rmse",
-            "boosting_type": "gbdt",
-            "learning_rate": 0.05,
-            "num_leaves":   31,
-            "min_child_samples": 20,   # évite les feuilles sur 1 seul tronçon
-            "verbose":      -1,
+            "objective":         "regression",
+            "metric":            "rmse",
+            "boosting_type":     "gbdt",
+            "learning_rate":     0.05,
+            "num_leaves":        31,
+            "min_child_samples": 20,
+            "verbose":           -1,
         }
         self.params.update(kwargs)
         self.model: lgb.Booster | None = None
@@ -102,6 +102,9 @@ class LGBMScorer(BaseScorer):
     def train(self, df: pd.DataFrame, target_col: str = "fraud_score") -> "LGBMScorer":
         """
         Entraîne le modèle LightGBM.
+
+        Ne modifie pas le DataFrame d'entrée (copie défensive si des booléens
+        doivent être convertis en entiers).
         """
         if target_col not in df.columns:
             raise ValueError(
@@ -109,11 +112,13 @@ class LGBMScorer(BaseScorer):
                 f"Colonnes disponibles : {list(df.columns)}"
             )
 
-        # --- CORRECTION 1 : Forcer les booléens en entiers (0/1) ---
-        # Empêche les features temporelles (is_weekend, etc.) de disparaître
-        for col in df.columns:
-            if pd.api.types.is_bool_dtype(df[col]):
-                df[col] = df[col].astype(int)
+        # ── Conversion booléens → entiers (copie défensive) ──────────────────
+        # LightGBM nécessite des features numériques.
+        # On copie df uniquement si nécessaire pour ne pas altérer l'appelant.
+        bool_cols = df.select_dtypes(include="bool").columns
+        if len(bool_cols) > 0:
+            df = df.copy()
+            df[bool_cols] = df[bool_cols].astype(int)
 
         # ── Sélection automatique des features ────────────────────────────────
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
