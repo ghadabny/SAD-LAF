@@ -21,7 +21,7 @@ Sorties :
 import sys
 from pathlib import Path
 
-# Ajoute la racine du projet au sys.path (même logique que conftest.py)
+# Ajoute la racine du projet au sys.path
 root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(root))
 
@@ -32,7 +32,6 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from shared.config import config
-from services.ml_engine.data.cache import DataCache
 from services.ml_engine.features.pipeline import FeaturePipeline
 from services.ml_engine.models.lgbm_model import LGBMScorer
 from sklearn.model_selection import train_test_split
@@ -60,7 +59,6 @@ def load_test_data() -> pd.DataFrame:
     df_raw = pd.read_parquet(parquet_files[-1])
     print(f"[evaluate] {len(df_raw):,} tronçons chargés.")
 
-    # Applique le pipeline de features (même transformation qu'à l'entraînement)
     from datetime import date
     df_raw["service_date"] = date.today()
     pipeline = FeaturePipeline.load("feature_pipeline.joblib")
@@ -130,7 +128,6 @@ def plot_diagnostics(scorer: LGBMScorer, df_test: pd.DataFrame) -> None:
     ax3 = fig.add_subplot(gs[0, 2])
     ax3.scatter(y_true, residuals, alpha=0.25, s=8, color="mediumpurple", rasterized=True)
     ax3.axhline(0, color="black", linewidth=1.2)
-    # Ligne de tendance : si non plate → biais systématique
     z = np.polyfit(y_true, residuals, 1)
     x_line = np.linspace(y_true.min(), y_true.max(), 100)
     ax3.plot(x_line, np.poly1d(z)(x_line), "r-", linewidth=1.5, label="Tendance")
@@ -142,7 +139,7 @@ def plot_diagnostics(scorer: LGBMScorer, df_test: pd.DataFrame) -> None:
     # ── 4. Feature Importance ─────────────────────────────────────────────────
     ax4 = fig.add_subplot(gs[1, :2])
     top_n = min(15, len(feat_df))
-    feat_top = feat_df.head(top_n).iloc[::-1]   # renverse pour barh (plus important en haut)
+    feat_top = feat_df.head(top_n).iloc[::-1]
 
     SUSPECTS = {
         "taux_irregularite", "nb_irregularites",
