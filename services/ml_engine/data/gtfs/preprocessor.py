@@ -19,6 +19,14 @@ class GTFSPreprocessor:
     # route_type=2 = Rail régional (TER, Intercités)
     TER_ROUTE_TYPE = 2
 
+    # Préfixes de stop_id SNCF — extraits en constante de classe (principe O).
+    # Si SNCF ajoute un nouveau format, on modifie UNIQUEMENT cette liste,
+    # pas la logique de clean_stop_id().
+    SNCF_STOP_AREA_PREFIXES: tuple[str, ...] = (
+        "StopArea:OCE",
+        "StopPoint:OCE",
+    )
+
     # Colonnes finales retournées par build_troncons()
     TRONCON_COLUMNS = [
         "trip_id", "train_number", "service_id", "stop_sequence",
@@ -51,10 +59,14 @@ class GTFSPreprocessor:
         """
         if not isinstance(stop_id, str):
             return stop_id
+        # Cas 1 : format avec tiret — on prend tout ce qui suit le dernier tiret.
+        # Robuste à tout nouveau service SNCF sans modifier cette méthode.
         if "-" in stop_id:
             return stop_id.rsplit("-", 1)[-1]
-        if stop_id.startswith("StopArea:OCE") or stop_id.startswith("StopPoint:OCE"):
-            return stop_id[-8:]
+        # Cas 2 : format sans tiret — on supprime le préfixe connu.
+        for prefix in self.SNCF_STOP_AREA_PREFIXES:
+            if stop_id.startswith(prefix):
+                return stop_id[-8:]
         return stop_id
 
     def parse_gtfs_time(self, time_series: pd.Series) -> pd.Series:
