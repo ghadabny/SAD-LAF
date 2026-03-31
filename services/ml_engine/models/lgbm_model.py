@@ -79,6 +79,25 @@ class LGBMScorer(BaseScorer):
         # Agrégats source déjà transformés en hist_* par le transformer
         "derniere_date_controle",
         "dep_minute_of_day",     # redondant avec dep_hour
+        # ── Colonnes LAF brutes — absentes à l'inférence GTFS ─────────────────
+        # Ces colonnes sont présentes dans le dataset d'entraînement unifié
+        # (GTFS joint avec les historiques LAF) mais ABSENTES à l'inférence
+        # où seul le flux GTFS est disponible.
+        #
+        # HistoricalFeatureTransformer les agrège déjà en trois features
+        # portables disponibles aussi à l'inférence :
+        #     nb_controles  → hist_nb_controles, hist_log_controles
+        #     pct_pv_tariff → hist_pct_pv_tariff
+        #
+        # Les inclure directement causerait un ValueError au predict() en prod :
+        #   "Colonnes manquantes : {'nb_controles', 'nb_pv', ...}"
+        "nb_controles",           # → hist_nb_controles + hist_log_controles
+        "nb_pv",                  # intermédiaire de calcul, non disponible en prod
+        "nb_pv_tariff",           # → hist_pct_pv_tariff
+        "nb_pv_non_tariff",       # résidu, non agrégé dans hist_*
+        "pv_intensity",           # = nb_pv / nb_controles, corrélé > 0.95 avec cible
+        "pct_pv_tariff",          # → hist_pct_pv_tariff (version agrégée O/D)
+        "montant_moyen_pv_cents", # stat LAF, absente du GTFS en production
     })
 
     def __init__(self, **kwargs):
