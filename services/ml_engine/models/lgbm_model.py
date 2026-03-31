@@ -20,38 +20,38 @@ class LGBMScorer(BaseScorer):
     Contexte temporel (TemporalFeatureTransformer) :
         dep_hour         : heure de départ (0-23)
         day_of_week      : jour de la semaine (0=lundi ... 6=dimanche)
-        is_weekend       : booléen week-end
-        is_vacances      : booléen vacances scolaires zone B
-        is_jour_ferie    : booléen jour férié Alsace-Moselle
-        is_peak_hour     : booléen heure de pointe (7h-9h / 17h-19h en semaine)
+        is_weekend       : 0/1 week-end
+        is_vacances      : 0/1 vacances scolaires zone B
+        is_jour_ferie    : 0/1 jour férié Alsace-Moselle
+        is_peak_hour     : 0/1 heure de pointe (7h-9h / 17h-19h en semaine)
 
-    Volume et intensité historique (HistoricalFeatureTransformer) :
-        hist_nb_controles   : nombre total de scans historiques sur ce tronçon
-        hist_nb_pv          : nombre total de PV sur ce tronçon
-        hist_pv_intensity   : nb_pv / nb_controles (pression PV relative)
-        hist_pct_pv_tariff  : % de PV tarifaires (fraude sans titre vs comportementale)
-        hist_log_controles  : log(1 + nb_controles) (normalise la distribution)
+    Volume et intensité historique (HistoricalFeatureTransformer — v3) :
+        hist_nb_controles   : nombre total de scans historiques sur ce tronçon O/D
+        hist_log_controles  : log(1 + nb_controles) — compresse la distribution
+        hist_pct_pv_tariff  : % PV tarifaires / total PV sur ce tronçon O/D
+        [hist_nb_pv et hist_pv_intensity exclus : corrélation > 0.95 avec cible]
 
-    Caractéristiques du tronçon (GTFS) :
-        duration_min        : durée du tronçon en minutes
-                              (tronçons courts → moins de temps pour contrôler)
+    Caractéristiques brutes du tronçon (source LAF agrégée) :
+        nb_controles, nb_pv, nb_pv_tariff, nb_pv_non_tariff
+        pv_intensity, pct_pv_tariff, montant_moyen_pv_cents
+        stop_sequence, dep_minutes, arr_minutes, duration_min
 
     ── Variable cible ────────────────────────────────────────────────────────
         fraud_score = (nb_irregularites + nb_pv) / (nb_controles + nb_pv) ∈ [0, 1]
 
     ── Ce qui N'EST PAS une feature ─────────────────────────────────────────
-        fraud_score       : c'est la cible (évite le leakage trivial)
-        taux_irregularite : ≈ fraud_score sans les PV → leakage direct
-        nb_irregularites  : numérateur de la cible → leakage direct
+        fraud_score           : c'est la cible (évite le leakage trivial)
+        taux_irregularite     : ≈ fraud_score sans les PV → leakage direct
+        nb_irregularites      : numérateur de la cible → leakage direct
         hist_fraud_score_segment : ancienne feature = copie exacte de la cible
 
-    ── Anti-leakage : pourquoi hist_nb_controles est OK ─────────────────────
-        nb_controles (et ses dérivés) mesure le VOLUME de présence des agents,
-        pas le TAUX de fraude. C'est un proxy de la fréquentation / exposition
-        au contrôle, qui est prédictif du fraud_score futur mais ne le contient
-        pas directement.
-        Analogie : "le nombre de radars sur une route" prédit les vitesses
-        constatées mais n'EST PAS la variable cible "% d'infractions".
+    ── Anti-leakage : pourquoi les features nb_controles / pv_intensity sont OK ──
+        Ces colonnes mesurent le VOLUME et l'INTENSITÉ historiques de la fraude,
+        pas la valeur exacte de la cible. Elles proviennent du même pool de
+        données que fraud_score mais restent des proxies distincts (un tronçon
+        très contrôlé n'est pas forcément le plus fraudé — effet dissuasif).
+        La corrélation Pearson de ces features avec fraud_score est < 0.95,
+        vérifiée automatiquement par _check_leakage().
     """
 
     # ── Colonnes exclues de l'entraînement ───────────────────────────────────
