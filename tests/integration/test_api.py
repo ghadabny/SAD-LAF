@@ -661,7 +661,7 @@ class TestOptimize:
     et exécute l'algorithme greedy. On mock uniquement GTFSLoader.
 
     Architecture des mocks :
-        services.api.routers.optimize.GTFSLoader → DataFrames synthétiques
+        services.or_engine.solver.GTFSLoader → DataFrames synthétiques
         TimeExpandedGraphBuilder et GTFSPreprocessor → implémentations réelles
 
     Pourquoi garder les implémentations réelles ?
@@ -704,13 +704,13 @@ class TestOptimize:
 
     def test_optimize_returns_200(self, gtfs_mock, optimize_payload):
         """POST /optimize retourne 200 avec des paramètres valides."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=optimize_payload)
         assert response.status_code == 200, response.text
 
     def test_optimize_response_schema(self, gtfs_mock, optimize_payload):
         """La réponse respecte le schéma OptimizeResponseSchema."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         assert "tournee"      in body
@@ -719,7 +719,7 @@ class TestOptimize:
 
     def test_optimize_tournee_structure(self, gtfs_mock, optimize_payload):
         """La tournée retournée contient tous les champs requis par TourneeSchema."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         tournee = body["tournee"]
@@ -732,7 +732,7 @@ class TestOptimize:
 
     def test_optimize_arcs_not_empty(self, gtfs_mock, optimize_payload):
         """La tournée contient au moins un arc (au moins un train inspecté)."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         arcs = body["tournee"]["arcs"]
@@ -740,7 +740,7 @@ class TestOptimize:
 
     def test_optimize_has_at_least_one_train(self, gtfs_mock, optimize_payload):
         """La tournée inclut au moins un arc TRAIN (le but du système)."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         tournee = body["tournee"]
@@ -751,7 +751,7 @@ class TestOptimize:
     def test_optimize_duree_within_budget(self, gtfs_mock, optimize_payload):
         """La durée totale de la tournée respecte le budget duree_max_minutes."""
         budget = optimize_payload["duree_max_minutes"]
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         duree = body["tournee"]["duree_totale_minutes"]
@@ -759,7 +759,7 @@ class TestOptimize:
 
     def test_optimize_score_total_is_positive(self, gtfs_mock, optimize_payload):
         """Le score total de la tournée est positif (> 0 si au moins un train)."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         score_total = body["tournee"]["score_total"]
@@ -767,7 +767,7 @@ class TestOptimize:
 
     def test_optimize_arc_score_in_range(self, gtfs_mock, optimize_payload):
         """Chaque arc TRAIN de la tournée a un fraud_score ∈ [0.0, 1.0]."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         for arc in body["tournee"]["arcs"]:
@@ -777,7 +777,7 @@ class TestOptimize:
 
     def test_optimize_service_date_echoed(self, gtfs_mock, optimize_payload):
         """La date de service dans la tournée correspond à la date demandée."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         assert body["tournee"]["service_date"]   == SERVICE_DATE
@@ -785,7 +785,7 @@ class TestOptimize:
 
     def test_optimize_request_echoed_in_response(self, gtfs_mock, optimize_payload):
         """Le bloc 'request' de la réponse reprend les paramètres envoyés."""
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             body = client.post("/optimize", json=optimize_payload).json()
 
         request = body["request"]
@@ -806,7 +806,7 @@ class TestOptimize:
             "duree_max_minutes": 40,
             "service_date":      SERVICE_DATE,
         }
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         # Soit 200 (tournée trouvée), soit 404 (budget trop court)
@@ -824,7 +824,7 @@ class TestOptimize:
         Aucun nœud dans le graphe → 0 train disponible.
         """
         payload = {**optimize_payload, "gare_depart_id": "00000000"}
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         assert response.status_code == 404
@@ -832,7 +832,7 @@ class TestOptimize:
     def test_optimize_invalid_gare_id_returns_422(self, gtfs_mock, optimize_payload):
         """Un code UIC invalide (pas 8 chiffres) retourne 422."""
         payload = {**optimize_payload, "gare_depart_id": "STRAS"}   # non-UIC
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         assert response.status_code == 422
@@ -840,7 +840,7 @@ class TestOptimize:
     def test_optimize_negative_duration_returns_422(self, gtfs_mock, optimize_payload):
         """Un budget négatif retourne 422."""
         payload = {**optimize_payload, "duree_max_minutes": -10}
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         assert response.status_code == 422
@@ -848,7 +848,7 @@ class TestOptimize:
     def test_optimize_duration_exceeds_max_returns_422(self, gtfs_mock, optimize_payload):
         """Un budget > 720 min (12h) retourne 422 (contrainte opérationnelle)."""
         payload = {**optimize_payload, "duree_max_minutes": 800}
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         assert response.status_code == 422
@@ -856,7 +856,7 @@ class TestOptimize:
     def test_optimize_date_without_service_returns_404(self, gtfs_mock, optimize_payload):
         """Une date hors du calendrier GTFS retourne 404."""
         payload = {**optimize_payload, "service_date": "2025-01-15"}
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=gtfs_mock):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=gtfs_mock):
             response = client.post("/optimize", json=payload)
 
         assert response.status_code == 404
@@ -866,7 +866,7 @@ class TestOptimize:
         mock_raising = MagicMock()
         mock_raising.load_stop_times.side_effect = FileNotFoundError("stop_times.txt")
 
-        with patch("services.api.routers.optimize.GTFSLoader", return_value=mock_raising):
+        with patch("services.or_engine.solver.GTFSLoader", return_value=mock_raising):
             response = client.post("/optimize", json=optimize_payload)
 
         assert response.status_code == 503
