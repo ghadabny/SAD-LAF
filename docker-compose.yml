@@ -1,5 +1,17 @@
 # docker-compose.yml — SAD-LAF
-# Une seule commande : docker-compose up
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# DÉMARRAGE QUOTIDIEN (automatique via Windows Task Scheduler au boot) :
+#   docker-compose up -d api scheduler
+#
+# GTFS Static    → téléchargé automatiquement par le scheduler tous les jours à 03:00
+# GTFS-RT        → mis à jour automatiquement par le scheduler toutes les 2 minutes
+# Export CSV     → déclenché automatiquement à chaque POST /optimize
+#
+# MANUEL — uniquement lors d'une nouvelle livraison LAF :
+#   docker-compose run --rm ml_engine
+#
+# ─────────────────────────────────────────────────────────────────────────────
 
 networks:
   sad_laf_net:
@@ -25,42 +37,14 @@ x-env-data: &env-data
 
 services:
 
-  # ÉTAPE 1 — Téléchargement GTFS
-  gtfs_downloader:
-    build:
-      context: .
-      dockerfile: services/ml_engine/Dockerfile
-    image: sad-laf-ml-engine:latest
-    container_name: sad_laf_gtfs_downloader
-    volumes:
-      - sad_laf_data:/app/data
-    environment:
-      <<: *env-data
-    networks:
-      - sad_laf_net
-    command: ["python", "services/ml_engine/data/gtfs/downloader.py"]
-    restart: on-failure
-
-  # ÉTAPE 2 — Entraînement LightGBM
-  ml_engine:
-    build:
-      context: .
-      dockerfile: services/ml_engine/Dockerfile
-    image: sad-laf-ml-engine:latest
-    container_name: sad_laf_ml_engine
-    volumes:
-      - sad_laf_data:/app/data
-    environment:
-      <<: *env-data
-    networks:
-      - sad_laf_net
-    depends_on:
-      gtfs_downloader:
-        condition: service_completed_successfully
-    command: ["python", "services/ml_engine/train.py"]
-    restart: on-failure
-
-  # ÉTAPE 3 — API FastAPI
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE CONTINU 1 — API FastAPI
+  #
+  # Responsabilités :
+  #   - Scoring ML (GET /predict)
+  #   - Génération de tournées (POST /optimize)
+  #   - Export CSV automatique après chaque /optimize
+  # ══════════════════════════════════════════════════════════════
   api:
     build:
       context: .
@@ -77,18 +61,21 @@ services:
       PREDICT_API_URL: "http://api:8000/predict/batch"
     networks:
       - sad_laf_net
-    depends_on:
-      ml_engine:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 15s
+      interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
       start_period: 30s
 
-  # ÉTAPE 4 — Scheduler
+  # ══════════════════════════════════════════════════════════════
+  # SERVICE CONTINU 2 — Scheduler APScheduler
+  #
+  # Responsabilités :
+  #   - GTFS-RT toutes les 2 minutes (retards, suppressions)
+  #   - GTFS Static tous les jours à 03:00 (nouveaux horaires)
+  # ══════════════════════════════════════════════════════════════
   scheduler:
     build:
       context: .
@@ -106,21 +93,25 @@ services:
       api:
         condition: service_healthy
 
-  # ÉTAPE 5 — Export CSV
-  exporter:
+  # ══════════════════════════════════════════════════════════════
+  # JOB MANUEL — Ré-entraînement LightGBM
+  #
+  # Lancer UNIQUEMENT lors d'une nouvelle livraison LAF :
+  #   docker-compose run --rm ml_engine
+  #
+  # Ne démarre PAS avec docker-compose up (profile: tools)
+  # ══════════════════════════════════════════════════════════════
+  ml_engine:
     build:
       context: .
-      dockerfile: services/exporter/Dockerfile
-    image: sad-laf-exporter:latest
-    container_name: sad_laf_exporter
+      dockerfile: services/ml_engine/Dockerfile
+    image: sad-laf-ml-engine:latest
+    container_name: sad_laf_ml_engine
     volumes:
       - sad_laf_data:/app/data
     environment:
       <<: *env-data
     networks:
       - sad_laf_net
-    depends_on:
-      api:
-        condition: service_healthy
-    command: ["python", "-m", "services.exporter.export", "--all"]
-    restart: on-failure
+    command: ["python", "services/ml_engine/train.py"]
+    profiles: ["tools"]
