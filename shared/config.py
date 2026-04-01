@@ -20,18 +20,17 @@ class AppConfig:
         "https://eu.ftp.opendatasoft.com/sncf/plandata/export-opendata-sncf-gtfs.zip"
     )
 
-    # GTFS-RT Trip Updates : retards en temps réel
-    # Mis à jour toutes les 2 minutes, trains des 60 prochaines minutes
+    # GTFS Realtime
     GTFS_RT_TRIP_UPDATES_URL: str = os.getenv(
         "GTFS_RT_TRIP_UPDATES_URL",
         "https://proxy.transport.data.gouv.fr/resource/sncf-gtfs-rt-trip-updates"
     )
-
-    # GTFS-RT Service Alerts : suppressions et alertes de service
-    # Mis à jour toutes les 2 minutes
     GTFS_RT_SERVICE_ALERTS_URL: str = os.getenv(
         "GTFS_RT_SERVICE_ALERTS_URL",
         "https://proxy.transport.data.gouv.fr/resource/sncf-gtfs-rt-service-alerts"
+    )
+    GTFS_RT_CACHE_DIR: Path = Path(
+        os.getenv("GTFS_RT_CACHE_DIR", "data/cache/gtfs_rt")
     )
 
     # ── Proxy réseau ──────────────────────────────────────────────────────────
