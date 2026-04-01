@@ -351,10 +351,6 @@ def _greedy_optimize(
         Il n'est PAS optimal — il peut rater un arc de score 0.9 accessible
         via une correspondance longue au profit d'un arc de score 0.7 direct.
 
-    TODO : remplacer par OrienteeringOptimizer (PuLP/CBC) dans orienteering.py
-           Le MILP formule ce problème comme un Orienteering Problem :
-           maximiser sum(fraud_score × x_arc) sous contrainte de durée.
-
     Paramètres :
         graph             : graphe avec fraud_scores déjà injectés
         builder           : pour accéder à get_reachable_arcs()

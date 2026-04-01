@@ -410,7 +410,6 @@ def _split_then_build_features(
     print("\n✂️  SPLIT — Division train/test sur données brutes...")
 
     # ── Ajout de service_date AVANT le split ──────────────────────────────
-    # TODO : remplacer par la vraie date de circulation par tronçon depuis
     # le GTFS (colonne service_date réelle). Actuellement tous les tronçons
     # reçoivent date.today(), ce qui neutralise les features temporelles
     # calendaires (is_vacances, is_jour_ferie, is_peak_hour) puisqu'elles
