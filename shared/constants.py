@@ -14,9 +14,24 @@ MAX_MISSION_DURATION_HOURS: int = 6
 # Temps minimum de correspondance entre deux trains (contrainte opérationnelle)
 MIN_TRANSFER_MINUTES: int = 5
 
+# Temps d'attente maximum acceptable entre deux trains (qualité tournée agent)
+# Au-delà, l'arc de correspondance n'est pas créé dans le graphe.
+# Valeur calibrée sur le réseau GE : fréquence faible sur axes TGV transfrontaliers.
+MAX_TRANSFER_MINUTES: int = 30
+
 # Échelle de score de risque de fraude (sortie du modèle ML, discrétisée)
 FRAUD_SCORE_MIN: int = 1
 FRAUD_SCORE_MAX: int = 4
+
+# Durée à partir de laquelle un contrôle est considéré "pleinement efficace".
+# En dessous, le score ML est pondéré proportionnellement à la durée du trajet.
+# Formule : score_effectif = score_ml × min(1.0, duration_min / CONTROL_SATURATION_MINUTES)
+CONTROL_SATURATION_MINUTES: int = 20
+
+# Score effectif minimal en dessous duquel un arc TRAIN est exclu du graphe MILP.
+# Les arcs à fraud_score=0.0 (non scorés) sont conservés pour la connectivité :
+# CBC les ignorera naturellement via la fonction objectif.
+MIN_FRAUD_SCORE_THRESHOLD: float = 0.10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
