@@ -1,0 +1,58 @@
+name: Deploy — SAD-LAF ThinkStation
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ce workflow se déclenche après un push sur main (donc après que la CI passe).
+#
+# PRÉREQUIS — ThinkStation :
+#   1. Installer le GitHub Actions self-hosted runner :
+#      → GitHub repo → Settings → Actions → Runners → New self-hosted runner
+#      → Suivre les instructions Windows (installer comme service Windows)
+#
+#   2. Le runner tourne sur la ThinkStation et écoute les jobs GitHub.
+#      La ThinkStation n'a pas besoin d'être accessible depuis Internet —
+#      c'est elle qui se connecte à GitHub, pas l'inverse.
+#
+#   3. Docker Desktop doit être installé et démarré sur la ThinkStation.
+#
+# VARIABLES D'ENVIRONNEMENT À CONFIGURER :
+#   GitHub repo → Settings → Secrets and variables → Actions → New secret
+#     APP_DIR : chemin du repo sur la ThinkStation
+#               ex: C:\Users\0104142Y\OneDrive - SNCF\Documents\SAD-LAF
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:     # permet de déclencher manuellement depuis GitHub
+
+jobs:
+  deploy:
+    name: Deploy to ThinkStation
+    runs-on: self-hosted  # ← le runner installé sur la ThinkStation
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Arrêter les containers existants
+        working-directory: ${{ secrets.APP_DIR }}
+        run: docker compose down
+
+      - name: Rebuild les images
+        working-directory: ${{ secrets.APP_DIR }}
+        run: docker compose build --no-cache api scheduler
+
+      - name: Démarrer les services
+        working-directory: ${{ secrets.APP_DIR }}
+        run: docker compose up -d api scheduler
+
+      - name: Vérifier que l'API répond
+        run: |
+          Start-Sleep -Seconds 15
+          $response = Invoke-WebRequest -Uri "http://localhost:8000/health" -UseBasicParsing
+          if ($response.StatusCode -ne 200) {
+            Write-Error "L'API ne répond pas après le déploiement"
+            exit 1
+          }
+          Write-Host "✅ API opérationnelle après déploiement"
+        shell: pwsh
