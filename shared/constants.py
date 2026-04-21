@@ -11,13 +11,60 @@ MIN_BOARD_DURATION_MINUTES: int = 6
 # Durée maximale d'une mission agent (contrainte RH)
 MAX_MISSION_DURATION_HOURS: int = 6
 
-# Temps minimum de correspondance entre deux trains (contrainte opérationnelle)
+# Temps minimum de correspondance global (fallback si gare non connue)
 MIN_TRANSFER_MINUTES: int = 5
 
 # Temps d'attente maximum acceptable entre deux trains (qualité tournée agent)
 # Au-delà, l'arc de correspondance n'est pas créé dans le graphe.
-# Valeur calibrée sur le réseau GE : fréquence faible sur axes TGV transfrontaliers.
-MAX_TRANSFER_MINUTES: int = 30
+MAX_TRANSFER_MINUTES: int = 60
+
+# ── Délai de prise de service ─────────────────────────────────────────────────
+# L'agent monte à bord 10 minutes après sa prise de service (PS).
+# Exemple : PS 04h30 → premier train possible à 04h40.
+MISSION_START_OFFSET_MINUTES: int = 10
+
+# ── Temps de correspondance minimum par gare ──────────────────────────────────
+# Source : données terrain agents LAF — Direction Lignes Alsace
+# Calibrés sur la géographie des quais et le temps de traversée moyen.
+# Un agent doit descendre d'un train, traverser le quai et monter dans le
+# suivant dans ce délai minimum.
+#
+# SOLID — principe O : pour ajouter une nouvelle gare, ajouter simplement
+# une entrée ici. Aucun autre code ne doit être modifié.
+MIN_TRANSFER_BY_STOP: dict[str, int] = {
+    "87212027": 8,   # Strasbourg (grande gare, quais éloignés)
+    "87214007": 5,   # Sélestat
+    "87214080": 5,   # Colmar
+    "87182063": 6,   # Mulhouse
+    "87213132": 5,   # Saverne
+    "87214205": 4,   # Obernai
+    "87213793": 4,   # Molsheim
+    "87213587": 4,   # Erstein
+    "87213843": 4,   # Barr
+    "87214031": 4,   # Ribeauvillé
+}
+
+# Valeur par défaut pour toutes les gares non listées (haltes, gares simples)
+MIN_TRANSFER_DEFAULT: int = 4
+
+
+def get_min_transfer(stop_id: str) -> int:
+    """
+    Retourne le temps de correspondance minimum pour une gare donnée.
+
+    Responsabilité unique : encapsuler la logique de lookup par gare.
+    En cas de gare inconnue, retourne MIN_TRANSFER_DEFAULT.
+
+    Usage dans builder.py :
+        from shared.constants import get_min_transfer
+        min_tr = get_min_transfer(stop_id)
+    """
+    return MIN_TRANSFER_BY_STOP.get(stop_id, MIN_TRANSFER_DEFAULT)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scoring ML
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Échelle de score de risque de fraude (sortie du modèle ML, discrétisée)
 FRAUD_SCORE_MIN: int = 1
@@ -37,43 +84,46 @@ MIN_FRAUD_SCORE_THRESHOLD: float = 0.10
 # ─────────────────────────────────────────────────────────────────────────────
 # Vacances scolaires — Zone B (académies Strasbourg et Nancy-Metz)
 # Source : https://www.education.gouv.fr/calendrier-scolaire
-#
-# Format : liste de tuples (date_début, date_fin) INCLUSES
-# Année scolaire 2024-2025
-#
-# Pourquoi ici plutôt que dans temporal.py ?
-#   → Ce sont des données métier, pas de la logique de code.
-#     L'année prochaine on met à jour uniquement ce fichier.
 # ─────────────────────────────────────────────────────────────────────────────
 
-VACANCES_ZONE_B_2024_2025: list[tuple[date, date]] = [
-    # Toussaint
+VACANCES_ZONE_B_2024_2025 = [
+    # 2024-2025
     (date(2024, 10, 19), date(2024, 11,  4)),
-    # Noël
     (date(2024, 12, 21), date(2025,  1,  6)),
-    # Hiver
     (date(2025,  2, 22), date(2025,  3, 10)),
-    # Printemps
     (date(2025,  4, 19), date(2025,  5,  5)),
-    # Été
     (date(2025,  7,  5), date(2025,  8, 31)),
+    # 2025-2026
+    (date(2025, 10, 18), date(2025, 11,  3)),
+    (date(2025, 12, 20), date(2026,  1,  5)),
+    (date(2026,  2, 14), date(2026,  3,  2)),
+    (date(2026,  4, 18), date(2026,  5,  4)),
 ]
 
-# Jours fériés France 2024-2025 (fixes + Alsace-Moselle)
-# L'Alsace a 2 jours fériés supplémentaires : Vendredi Saint et 26 décembre
-JOURS_FERIES_2024_2025: list[date] = [
-    date(2024,  7, 14),  # Fête nationale
-    date(2024,  8, 15),  # Assomption
-    date(2024, 11,  1),  # Toussaint
-    date(2024, 11, 11),  # Armistice
-    date(2024, 12, 25),  # Noël
-    date(2024, 12, 26),  # Saint-Étienne (Alsace-Moselle uniquement)
-    date(2025,  1,  1),  # Jour de l'an
-    date(2025,  4, 18),  # Vendredi Saint (Alsace-Moselle uniquement)
-    date(2025,  4, 21),  # Lundi de Pâques
-    date(2025,  5,  1),  # Fête du travail
-    date(2025,  5,  8),  # Victoire 1945
-    date(2025,  5, 29),  # Ascension
-    date(2025,  6,  9),  # Lundi de Pentecôte
-    date(2025,  7, 14),  # Fête nationale
+JOURS_FERIES_2024_2025 = [
+    # 2024
+    date(2024,  7, 14),
+    date(2024,  8, 15),
+    date(2024, 11,  1),
+    date(2024, 11, 11),
+    date(2024, 12, 25),
+    # 2025
+    date(2025,  1,  1),
+    date(2025,  4, 21),
+    date(2025,  5,  1),
+    date(2025,  5,  8),
+    date(2025,  5, 29),
+    date(2025,  6,  9),
+    date(2025,  7, 14),
+    date(2025,  8, 15),
+    date(2025, 11,  1),
+    date(2025, 11, 11),
+    date(2025, 12, 25),
+    # 2026
+    date(2026,  1,  1),
+    date(2026,  4,  6),
+    date(2026,  5,  1),
+    date(2026,  5,  8),
+    date(2026,  5, 14),
+    date(2026,  5, 25),
 ]
