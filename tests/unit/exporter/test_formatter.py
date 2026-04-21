@@ -38,6 +38,9 @@ from shared.schemas import (
 SERVICE_DATE = date(2026, 4, 14)
 NOW          = datetime(2026, 4, 14, 10, 0, 0)
 
+# tournee_id factice réutilisé dans toutes les fixtures de test
+_TOURNEE_ID_TEST = "TRN_TEST_20260414_00000001"
+
 
 def make_node(stop_id: str, name: str, t: int) -> NodeSchema:
     return NodeSchema(stop_id=stop_id, stop_name=name,
@@ -97,7 +100,9 @@ def tournee_simple() -> TourneeSchema:
 
 @pytest.fixture
 def response_simple(tournee_simple) -> OptimizeResponseV2Schema:
+    # FIX : tournee_id est requis depuis le refactoring Bug 1 (UUID unique par router)
     return OptimizeResponseV2Schema(
+        tournee_id=_TOURNEE_ID_TEST,
         tournee=tournee_simple,
         request=make_request(),
         score_perte_pct=5.2,
@@ -196,8 +201,12 @@ class TestTourneeFormatter:
 
     def test_fraud_score_present_si_show_scores_true(self, tournee_simple):
         req      = make_request(show_scores=True)
+        # FIX : tournee_id requis
         response = OptimizeResponseV2Schema(
-            tournee=tournee_simple, request=req, optimized_at=NOW
+            tournee_id=_TOURNEE_ID_TEST,
+            tournee=tournee_simple,
+            request=req,
+            optimized_at=NOW,
         )
         df = TourneeFormatter().format(response)
         assert "fraud_score" in df.columns
@@ -230,8 +239,6 @@ class TestTourneeFormatter:
 
     def test_score_perte_pct_dans_df(self, response_simple):
         df = TourneeFormatter().format(response_simple)
-        # pytest.approx n'est pas compatible avec pandas Series.all() —
-        # on compare les valeurs numpy directement
         assert (abs(df["score_perte_pct"] - 5.2) < 1e-5).all()
 
     def test_warnings_dans_df(self, response_simple):
@@ -248,10 +255,8 @@ class TestTourneeFormatter:
         """Format : TRN_{AGENT_ID}_{YYYYMMDD}_{uid4_court}"""
         df  = TourneeFormatter().format(response_simple)
         tid = df.iloc[0]["tournee_id"]
-        # Vérifications robustes — l'agent_id peut contenir des underscores
         assert tid.startswith("TRN_"), f"Doit commencer par TRN_ : {tid}"
         assert "20260414" in tid, f"Date YYYYMMDD attendue dans l'ID : {tid}"
-        # L'uid final est le dernier segment (8 caractères hex majuscules)
         uid_part = tid.split("_")[-1]
         assert len(uid_part) == 8, f"UID attendu sur 8 caractères, reçu : {uid_part!r}"
 
@@ -271,26 +276,38 @@ class TestTourneeFormatter:
             gare_arrivee=make_node("87212027", "Strasbourg", 490),
             service_date=SERVICE_DATE,
         )
+        # FIX : tournee_id requis
         response = OptimizeResponseV2Schema(
-            tournee=tournee_vide, request=make_request(), optimized_at=NOW
+            tournee_id=_TOURNEE_ID_TEST,
+            tournee=tournee_vide,
+            request=make_request(),
+            optimized_at=NOW,
         )
         df = TourneeFormatter().format(response)
         assert df.empty
 
     def test_priorite_correcte_haute(self, tournee_simple):
         """Score 0.80 → HAUTE."""
+        # FIX : tournee_id requis
         df = TourneeFormatter().format(
             OptimizeResponseV2Schema(
-                tournee=tournee_simple, request=make_request(), optimized_at=NOW
+                tournee_id=_TOURNEE_ID_TEST,
+                tournee=tournee_simple,
+                request=make_request(),
+                optimized_at=NOW,
             )
         )
         assert df.iloc[0]["priorite"] == "HAUTE"
 
     def test_priorite_correcte_moyenne(self, tournee_simple):
         """Score 0.65 → HAUTE (au seuil exact)."""
+        # FIX : tournee_id requis
         df = TourneeFormatter().format(
             OptimizeResponseV2Schema(
-                tournee=tournee_simple, request=make_request(), optimized_at=NOW
+                tournee_id=_TOURNEE_ID_TEST,
+                tournee=tournee_simple,
+                request=make_request(),
+                optimized_at=NOW,
             )
         )
         assert df.iloc[1]["priorite"] == "HAUTE"   # 0.65 == SEUIL_HAUTE
