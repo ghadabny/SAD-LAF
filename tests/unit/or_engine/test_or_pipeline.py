@@ -27,10 +27,10 @@ import pandas as pd
 from services.or_engine.graph.builder import TimeExpandedGraphBuilder
 from services.or_engine.graph.transition import Arc, ArcType, Node
 from services.or_engine.solver import (
-    _greedy_optimize,
     fetch_scores_from_api,
     inject_scores,
 )
+from services.or_engine.optimizer.orienteering import OrienteeringOptimizer
 from shared.schemas import PredictScoreItem
 
 
@@ -358,12 +358,12 @@ class TestTourneeAvecScoresInjectes:
         """
         builder = TimeExpandedGraphBuilder()
         graph   = builder.build(troncons_df_sample, SERVICE_DATE)
+        optimizer= OrienteeringOptimizer()
 
         inject_scores(graph, scores_ml)
 
-        tournee = _greedy_optimize(
+        tournee = optimizer.solve(
             graph=graph,
-            builder=builder,
             gare_depart_id="87212027",
             heure_depart_min=8 * 60,
             duree_max_minutes=360,
@@ -388,10 +388,11 @@ class TestTourneeAvecScoresInjectes:
         builder = TimeExpandedGraphBuilder()
         graph   = builder.build(troncons_df_sample, SERVICE_DATE)
         inject_scores(graph, scores_ml)
+        optimizer= OrienteeringOptimizer()
 
-        tournee = _greedy_optimize(
+
+        tournee = optimizer.solve(
             graph=graph,
-            builder=builder,
             gare_depart_id="87212027",
             heure_depart_min=8 * 60,
             duree_max_minutes=360,
@@ -418,10 +419,10 @@ class TestTourneeAvecScoresInjectes:
         builder = TimeExpandedGraphBuilder()
         graph   = builder.build(troncons_df_sample, SERVICE_DATE)
         inject_scores(graph, scores_ml)
+        optimizer= OrienteeringOptimizer()
 
-        tournee = _greedy_optimize(
+        tournee = optimizer.solve(
             graph=graph,
-            builder=builder,
             gare_depart_id="87212027",
             heure_depart_min=8 * 60,
             duree_max_minutes=360,
@@ -440,10 +441,11 @@ class TestTourneeAvecScoresInjectes:
         builder = TimeExpandedGraphBuilder()
         graph   = builder.build(troncons_df_sample, SERVICE_DATE)
         inject_scores(graph, scores_ml)
+        optimizer= OrienteeringOptimizer()
 
-        tournee = _greedy_optimize(
+
+        tournee = optimizer.solve(
             graph=graph,
-            builder=builder,
             gare_depart_id="87212027",
             heure_depart_min=8 * 60,
             duree_max_minutes=40,  # seulement 40 min
@@ -459,11 +461,12 @@ class TestTourneeAvecScoresInjectes:
         """
         builder = TimeExpandedGraphBuilder()
         graph   = builder.build(troncons_df_sample, SERVICE_DATE)
+        optimizer= OrienteeringOptimizer()
+
 
         with pytest.raises(ValueError, match="Aucun train"):
-            _greedy_optimize(
+            optimizer.solve(
                 graph=graph,
-                builder=builder,
                 gare_depart_id="99999999",  # gare inexistante
                 heure_depart_min=8 * 60,
                 duree_max_minutes=360,

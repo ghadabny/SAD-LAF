@@ -250,30 +250,30 @@ class TestRealtimeFetcherRun:
 
     def test_run_retourne_realtime_update(self, fetcher):
         """run() doit retourner un RealtimeUpdate."""
-        with patch.object(fetcher, "_run_trip_updates", return_value=set()), \
-             patch.object(fetcher, "_run_service_alerts", return_value=set()):
+        with patch.object(fetcher, "_run_detection_trip_updates", return_value=set()), \
+             patch.object(fetcher, "_run_detection_service_alerts", return_value=set()):
             result = fetcher.run()
         assert isinstance(result, RealtimeUpdate)
 
     def test_run_has_changed_false_si_rien(self, fetcher):
         """Pas de changement → has_changed = False."""
-        with patch.object(fetcher, "_run_trip_updates", return_value=set()), \
-             patch.object(fetcher, "_run_service_alerts", return_value=set()):
+        with patch.object(fetcher, "_run_detection_trip_updates", return_value=set()), \
+             patch.object(fetcher, "_run_detection_service_alerts", return_value=set()):
             result = fetcher.run()
         assert result.has_changed == False
 
     def test_run_has_changed_true_si_retard(self, fetcher):
         """Retard détecté → has_changed = True."""
-        with patch.object(fetcher, "_run_trip_updates", return_value={"TRIP_001"}), \
-             patch.object(fetcher, "_run_service_alerts", return_value=set()):
+        with patch.object(fetcher, "_run_detection_trip_updates", return_value={"TRIP_001"}), \
+             patch.object(fetcher, "_run_detection_service_alerts", return_value=set()):
             result = fetcher.run()
         assert result.has_changed == True
         assert "TRIP_001" in result.trips_delayed
 
     def test_run_has_changed_true_si_suppression(self, fetcher):
         """Suppression détectée → has_changed = True."""
-        with patch.object(fetcher, "_run_trip_updates", return_value=set()), \
-             patch.object(fetcher, "_run_service_alerts", return_value={"TRIP_002"}):
+        with patch.object(fetcher, "_run_detection_trip_updates", return_value=set()), \
+             patch.object(fetcher, "_run_detection_service_alerts", return_value={"TRIP_002"}):
             result = fetcher.run()
         assert result.has_changed == True
         assert "TRIP_002" in result.trips_cancelled
@@ -281,16 +281,16 @@ class TestRealtimeFetcherRun:
     def test_run_ne_propage_pas_exception(self, fetcher):
         """Si le réseau est indisponible, run() ne propage pas l'exception."""
         with patch.object(
-            fetcher, "_fetch_protobuf", side_effect=ConnectionError("réseau")
+            fetcher, "_fetch_bytes", side_effect=ConnectionError("réseau")
         ):
             result = fetcher.run()
         assert isinstance(result, RealtimeUpdate)
         assert result.has_changed == False
 
     def test_run_appelle_les_deux_fetch(self, fetcher):
-        """run() doit appeler _run_trip_updates ET _run_service_alerts."""
-        with patch.object(fetcher, "_run_trip_updates", return_value=set()) as mock_tu, \
-             patch.object(fetcher, "_run_service_alerts", return_value=set()) as mock_sa:
+        """run() doit appeler _run_trip_updates ET _run_detection_service_alerts."""
+        with patch.object(fetcher, "_run_detection_trip_updates", return_value=set()) as mock_tu, \
+             patch.object(fetcher, "_run_detection_service_alerts", return_value=set()) as mock_sa:
             fetcher.run()
         mock_tu.assert_called_once()
         mock_sa.assert_called_once()
