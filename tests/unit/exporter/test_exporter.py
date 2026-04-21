@@ -74,6 +74,7 @@ def response(tmp_path) -> OptimizeResponseV2Schema:
         agent_id="LAF_042",
     )
     return OptimizeResponseV2Schema(
+        tournee_id="TRN_TEST_20260414_00000001",
         tournee=tournee,
         request=req,
         score_perte_pct=0.0,
@@ -220,6 +221,7 @@ class TestBuildFilename:
             service_date=SERVICE_DATE, agent_id=None,
         )
         response_no_agent = OptimizeResponseV2Schema(
+            tournee_id="TRN_INCONNU_20260414_00000001",
             tournee=tournee, request=req, optimized_at=NOW,
         )
         exporter = TourneeExporter(output_dir=tmp_path)
