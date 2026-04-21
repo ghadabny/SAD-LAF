@@ -366,14 +366,13 @@ def _attach_service_dates(
     # Date représentative par service_id : on prend la plus fréquente (mode)
     # Si un service a 45 lundis et 32 samedis, on prend le lundi.
     # Cela préserve la distribution calendaire réelle de la majorité des trips.
-    service_date_map = (
-        active.groupby("service_id")["service_date"]
-        .agg(lambda x: x.mode().iloc[0])
-        .reset_index()
+    service_dates_all = (
+        active[["service_id", "service_date"]]
+        .drop_duplicates()
     )
 
     n_before = len(df)
-    df = df.merge(service_date_map, on="service_id", how="left")
+    df = df.merge(service_dates_all, on="service_id", how="left")
 
     # Fallback pour les service_id sans entrée dans calendar_dates
     n_missing = df["service_date"].isna().sum()
@@ -433,7 +432,9 @@ def _split_then_build_features(
     df_merged = _attach_service_dates(df_merged, gtfs_calendar_dates)
 
     df_train_raw, df_test_raw = train_test_split(
-        df_merged, test_size=0.2, random_state=42
+        df_merged,
+        test_size=0.2,
+        random_state=42,
     )
     print(
         f"   Train brut : {len(df_train_raw):,} tronçons | "

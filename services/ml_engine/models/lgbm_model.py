@@ -157,6 +157,18 @@ class LGBMScorer(BaseScorer):
             f"{self.feature_cols}"
         )
 
+        leaked = [c for c in self.feature_cols if c in {
+            "nb_controles", "nb_pv", "nb_pv_tariff",
+            "nb_pv_non_tariff", "pv_intensity", "pct_pv_tariff",
+            "montant_moyen_pv_cents"
+        }]
+        if leaked:
+            raise RuntimeError(
+                f"[LGBMScorer] ERREUR : colonnes LAF brutes présentes dans "
+                f"les features — elles auraient dû être exclues par "
+                f"COLS_NON_FEATURES : {leaked}"
+            )
+
         # ── Vérification anti-leakage ─────────────────────────────────────────
         self._check_leakage(df, target_col)
 
