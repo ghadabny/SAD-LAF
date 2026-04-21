@@ -11,11 +11,11 @@ from shared.constants import (
     MAX_TRANSFER_MINUTES,
     MIN_BOARD_DURATION_MINUTES,
     MIN_TRANSFER_MINUTES,
+    get_min_transfer,
 )
 
 logger = logging.getLogger(__name__)
 
-# Types internes
 _StopIndex = dict[str, list[tuple[int, str]]]  # stop_id → [(minutes, stop_name)]
 
 
@@ -27,14 +27,13 @@ class TimeExpandedGraphBuilder:
     Ne sait pas comment les scores sont calculés (rôle du modèle ML).
     Ne sait pas comment le graphe est optimisé (rôle de l'optimiseur).
 
-    Algorithme O(n log n) pour les correspondances :
-        Tri des départs par gare + bisect pour trouver la fenêtre valide
-        [arr + MIN_TRANSFER, arr + MAX_TRANSFER] en O(log k) par arrivée.
+    Changement v2 : les temps de correspondance minimum sont maintenant
+    par gare via get_min_transfer(stop_id) — la constante globale
+    MIN_TRANSFER_MINUTES reste le fallback pour les gares non référencées.
     """
 
     def __init__(self):
         self.min_board_duration = MIN_BOARD_DURATION_MINUTES
-        self.min_transfer       = MIN_TRANSFER_MINUTES
         self.max_transfer       = MAX_TRANSFER_MINUTES
 
     # ── Interface publique ────────────────────────────────────────────────────
@@ -87,11 +86,6 @@ class TimeExpandedGraphBuilder:
         troncons: pd.DataFrame,
         service_date: date,
     ) -> dict:
-        """
-        Ajoute un arc TRAIN pour chaque tronçon GTFS de durée suffisante.
-        Délègue le filtrage, la création de nœuds et la création d'arcs
-        à des méthodes dédiées (principe S).
-        """
         troncons_valides = self._filter_valid_troncons(troncons)
         for _, row in troncons_valides.iterrows():
             arc = self._make_train_arc(row, service_date)
@@ -100,8 +94,8 @@ class TimeExpandedGraphBuilder:
 
     def _filter_valid_troncons(self, troncons: pd.DataFrame) -> pd.DataFrame:
         """Filtre les tronçons dont la durée est suffisante pour un contrôle."""
-        valides  = troncons[troncons["duration_min"] >= self.min_board_duration]
-        skipped  = len(troncons) - len(valides)
+        valides = troncons[troncons["duration_min"] >= self.min_board_duration]
+        skipped = len(troncons) - len(valides)
         if skipped > 0:
             logger.info(
                 "[GraphBuilder] %d tronçons ignorés (durée < %d min).",
@@ -137,10 +131,6 @@ class TimeExpandedGraphBuilder:
         troncons: pd.DataFrame,
         service_date: date,
     ) -> dict:
-        """
-        Ajoute les arcs de correspondance entre trains dans la même gare.
-        Délègue la construction des index et la création d'arcs (principe S).
-        """
         arrivees = self._build_arrivees_index(troncons)
         departs  = self._build_departs_index(troncons)
 
@@ -154,7 +144,6 @@ class TimeExpandedGraphBuilder:
         return graph
 
     def _build_arrivees_index(self, troncons: pd.DataFrame) -> _StopIndex:
-        """Construit l'index stop_id → [(arr_minutes, stop_name)] depuis troncons."""
         arrivees: _StopIndex = defaultdict(list)
         for _, row in troncons.iterrows():
             arrivees[row["stop_id_arr"]].append(
@@ -186,14 +175,19 @@ class TimeExpandedGraphBuilder:
     ) -> int:
         """
         Ajoute les arcs de correspondance pour une gare donnée.
-        Utilise bisect pour ne visiter que les départs dans la fenêtre valide.
+
+        Utilise get_min_transfer(stop_id) pour le temps minimum par gare
+        (Strasbourg : 8 min, autres gares : 4-6 min) au lieu d'une constante
+        globale. Algorithme O(n log n) via bisect.
+
         Retourne le nombre d'arcs créés.
         """
-        dep_minutes = [d[0] for d in departs]
-        n_added     = 0
+        min_transfer = get_min_transfer(stop_id)  # ← CHANGEMENT v2 : par gare
+        dep_minutes  = [d[0] for d in departs]
+        n_added      = 0
 
         for arr_min, stop_name in arrivees:
-            lo = bisect.bisect_left(dep_minutes,  arr_min + self.min_transfer)
+            lo = bisect.bisect_left(dep_minutes,  arr_min + min_transfer)
             hi = bisect.bisect_right(dep_minutes, arr_min + self.max_transfer)
 
             for dep_min, _ in departs[lo:hi]:
@@ -213,7 +207,6 @@ class TimeExpandedGraphBuilder:
         dep_min: int,
         service_date: date,
     ) -> Arc:
-        """Crée un arc CORRESPONDANCE entre deux instants dans la même gare."""
         return Arc(
             source=self._make_node(stop_id, stop_name, arr_min, service_date),
             destination=self._make_node(stop_id, stop_name, dep_min, service_date),
@@ -230,7 +223,6 @@ class TimeExpandedGraphBuilder:
         time_minutes: int,
         service_date: date,
     ) -> Node:
-        """Factorise la création de Node. Responsabilité unique : éviter la répétition."""
         return Node(
             stop_id=stop_id,
             stop_name=stop_name,
@@ -239,7 +231,6 @@ class TimeExpandedGraphBuilder:
         )
 
     def _validate(self, troncons: pd.DataFrame) -> None:
-        """Vérifie que les colonnes requises sont présentes. Fail-fast."""
         required = {
             "trip_id", "train_number",
             "stop_id_dep", "stop_name_dep", "dep_minutes",
@@ -254,7 +245,6 @@ class TimeExpandedGraphBuilder:
 
     @staticmethod
     def _log_graph_stats(graph: dict, service_date: date) -> None:
-        """Log les statistiques du graphe construit. Responsabilité unique : reporting."""
         n_nodes = len(graph)
         n_arcs  = sum(len(arcs) for arcs in graph.values())
         logger.info(
