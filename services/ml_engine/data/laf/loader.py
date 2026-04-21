@@ -123,6 +123,8 @@ class LAFLoader:
         "penalties_offender_identityDocument_documentType",
     ]
 
+    SC_COLUMNS: list[str] = CC_COLUMNS
+
     # Colonnes UIC à forcer en str pour conserver les zéros initiaux
     # (ex: un code "08714007" serait tronqué en 8714007 si lu en int)
     _UIC_COLUMNS_CC: list[str] = [
@@ -210,7 +212,7 @@ class LAFLoader:
         fichiers = self._find_files("SC")
         if not fichiers:
             print("[LAFLoader] SC introuvable — retour DataFrame vide.")
-            return self._empty_df(self.CC_COLUMNS)
+            return self._empty_df(self.SC_COLUMNS)
 
         print(f"[LAFLoader] {len(fichiers)} fichier(s) SC trouvé(s). Concaténation...")
         chunks = []
