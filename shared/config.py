@@ -59,6 +59,8 @@ class AppConfig:
     OUTPUTS_DIR: Path = Path(os.getenv("OUTPUTS_DIR", "data/outputs"))
     PROCESSED_DIR: Path = Path(os.getenv("PROCESSED_DIR", "data/processed"))
     HYPERPARAMS_PATH: Path = Path('services/ml_engine/config/hyperparameters.yml')
+    PREDICT_API_URL: str = os.getenv("PREDICT_API_URL", "http://api:8000/predict/batch")
+    API_VERSION: str = "0.2.0"
 
     @property
     def lgbm_params(self) -> dict:
