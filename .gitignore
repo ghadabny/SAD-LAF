@@ -54,3 +54,10 @@ htmlcov/
 
 # ===Doc Explicative pour moi ===
 doc/
+
+# === Cache GTFS-RT (généré automatiquement au runtime) ===
+data/cache/
+*.parquet
+
+# === Fichiers de test API ===
+apitest.py
