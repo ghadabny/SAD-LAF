@@ -78,7 +78,11 @@ def load_test_data() -> pd.DataFrame:
     df_features = pipeline.transform(df_raw)
 
     # Reproduit exactement le split de train.py
-    _, df_test = train_test_split(df_features, test_size=0.2, random_state=42)
+
+    od_pairs = df_raw[["stop_id_dep", "stop_id_arr"]].drop_duplicates()
+    _, od_test = train_test_split(od_pairs, test_size=0.2, random_state=42)
+    df_test = df_features.merge(od_test, on=["stop_id_dep", "stop_id_arr"])
+
     print(f"[evaluate] Jeu de test : {len(df_test):,} tronçons.")
     return df_test
 
