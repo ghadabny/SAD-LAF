@@ -74,4 +74,4 @@ class TestGTFSRTParser:
         result = self.parser.parse(raw, b"")
         df = result.stop_time_updates
         assert df["delay_dep_sec"].dtype == int
-        assert df["trip_id"].dtype == object  # str en pandas
+        assert df["trip_id"].dtype in (object, "string")
