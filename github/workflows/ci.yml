@@ -1,0 +1,43 @@
+name: CI — SAD-LAF
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            pytest pytest-cov \
+            fastapi httpx \
+            pandas numpy lightgbm scikit-learn joblib \
+            pydantic pulp PyYAML scipy \
+            pyarrow==14.0.2 \
+            gtfs-realtime-bindings protobuf \
+            python-dotenv requests
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ -v --tb=short \
+                 --cov=services --cov=shared \
+                 --cov-report=term-missing
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v --tb=short
+        continue-on-error: true
