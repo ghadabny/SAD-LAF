@@ -227,4 +227,4 @@ Voir `config/.env.example` pour la liste complète avec descriptions.
 
 ## Auteur
 
-Ghada Ben Younes — Stage ingénieur Data / IA · SNCF TER Alsace · 2026
+Ghada Ben Younes — Alternance ingénieur Data / IA · SNCF Technicentre Grand-Est · 2026
