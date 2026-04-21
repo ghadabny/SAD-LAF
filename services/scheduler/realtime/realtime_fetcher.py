@@ -1,3 +1,19 @@
+# services/scheduler/realtime/realtime_fetcher.py
+"""
+SOLID — SRP (v2) :
+    RealtimeFetcher ne gère plus que 2 responsabilités :
+        1. Fetch réseau des bytes protobuf bruts
+        2. Détection de changements (comparaison ancien/nouveau état)
+
+    La 3e responsabilité (mise à jour cache Parquet ML) est déléguée à
+    ParquetCacheUpdater via injection de dépendance.
+
+SOLID — DIP :
+    ParquetCacheUpdater est injecté dans le constructeur.
+    En test, on passe une doublure sans appel réseau ni écriture disque.
+"""
+from __future__ import annotations
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +23,7 @@ from google.transit import gtfs_realtime_pb2
 
 from shared.config import config
 from services.scheduler.realtime.realtime_update import RealtimeUpdate
-from services.ml_engine.data.gtfs_rt import GTFSRTParser, GTFSRTCache
+from services.scheduler.realtime.parquet_cache_updater import ParquetCacheUpdater
 
 
 DELAY_THRESHOLD_SECONDS: int = 300
@@ -15,43 +31,40 @@ DELAY_THRESHOLD_SECONDS: int = 300
 
 class RealtimeFetcher:
     """
-    Responsabilité unique : télécharger, décoder et synchroniser les flux GTFS-RT.
+    Responsabilités (après refactoring SRP) :
+        1. Télécharger les flux GTFS-RT (bytes protobuf, 1 appel réseau par flux)
+        2. Détecter les changements par comparaison JSON ancien/nouveau
 
-    Ce service fait le pont entre les deux pipelines RT du projet :
+    Ce que cette classe NE FAIT PLUS (délégué à ParquetCacheUpdater) :
+        - Parser les protobuf en DataFrames pandas
+        - Écrire les fichiers .parquet pour le pipeline ML
 
-        Pipeline 1 — Détection (scheduler) :
-            Télécharge les flux protobuf, les décode en JSON lisible,
-            compare avec le fetch précédent et retourne un RealtimeUpdate
-            indiquant quels trains ont changé de statut.
-            Écrit dans : data/raw/gtfs_rt/trip_updates.json
-                         data/raw/gtfs_rt/service_alerts.json
+    SOLID — DIP :
+        cache_updater est injecté. En production, ParquetCacheUpdater() par défaut.
+        En test, on injecte un FakeCacheUpdater qui ne touche pas au disque.
 
-        Pipeline 2 — Features ML (ml_engine) :
-            Alimente le cache Parquet lu par GTFSRealtimeFeatureTransformer
-            lors du scoring LightGBM. Sans ce cache, l'API score sans données RT.
-            Écrit dans : data/cache/gtfs_rt/stop_time_updates.parquet
-                         data/cache/gtfs_rt/cancelled_trips.parquet
-                         data/cache/gtfs_rt/meta.txt
-
-    Pourquoi le scheduler alimente le cache Parquet et pas l'API ?
-        Le scheduler est le seul service avec accès réseau planifié aux flux RT.
-        L'API ne doit jamais fetcher elle-même — elle lit uniquement depuis le cache.
-        Un seul appel réseau toutes les 2 minutes alimente les deux pipelines.
-
-    Séquence d'un cycle complet :
-        1. _fetch_protobuf()         → bytes bruts (1 seul appel réseau par flux)
-        2. _parse_trip_updates()     → dict JSON   → trip_updates.json
-        3. _parse_service_alerts()   → dict JSON   → service_alerts.json
-        4. _refresh_parquet_cache()  → DataFrames  → *.parquet  (via GTFSRTParser)
-        5. Retourne RealtimeUpdate   → scheduler décide si recalcul nécessaire
+    Séquence d'un cycle run() :
+        1. _fetch_bytes()                    → bytes bruts (1 appel réseau par flux)
+        2. _run_detection_trip_updates()     → set[trip_id] retardés
+        3. _run_detection_service_alerts()   → set[trip_id] supprimés
+        4. cache_updater.update()            → cache Parquet ML (délégué)
+        5. RealtimeUpdate                    → retourné au scheduler
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        cache_updater: ParquetCacheUpdater | None = None,
+    ) -> None:
+        """
+        Paramètre :
+            cache_updater : gestionnaire du cache Parquet ML.
+                            Par défaut : ParquetCacheUpdater() (production).
+                            Injectez un mock en test pour éviter les I/O disque.
+        """
         self.trip_updates_url   = config.GTFS_RT_TRIP_UPDATES_URL
         self.service_alerts_url = config.GTFS_RT_SERVICE_ALERTS_URL
         self.output_dir         = config.GTFS_RT_DIR
-        self._parser_ml         = GTFSRTParser()
-        self._cache             = GTFSRTCache()
+        self._cache_updater     = cache_updater or ParquetCacheUpdater()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Interface publique ────────────────────────────────────────────────────
@@ -60,27 +73,29 @@ class RealtimeFetcher:
         """
         Cycle complet : fetch → détection → cache Parquet → RealtimeUpdate.
 
-        On continue même si un flux échoue — si Trip Updates plante,
-        on veut quand même récupérer Service Alerts.
+        Resilient par design :
+            - Si Trip Updates échoue, on continue avec Service Alerts.
+            - Si le cache Parquet échoue, le RealtimeUpdate est quand même retourné.
         """
         print(
             f"[RealtimeFetcher] Fetch GTFS-RT "
             f"— {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-        # ── Étape 1 : fetch des bytes bruts (1 appel réseau par flux) ─────────
+        # ── Étape 1 : fetch bytes (1 appel réseau par flux) ───────────────────
         tu_bytes = self._fetch_bytes(self.trip_updates_url, "Trip Updates")
         sa_bytes = self._fetch_bytes(self.service_alerts_url, "Service Alerts")
 
-        # ── Étape 2 : pipeline de détection (JSON pour comparaison) ──────────
+        # ── Étape 2 : détection de changements ───────────────────────────────
         delayed   = self._run_detection_trip_updates(tu_bytes)
         cancelled = self._run_detection_service_alerts(sa_bytes)
 
-        # ── Étape 3 : pipeline ML (Parquet pour GTFSRealtimeFeatureTransformer)
+        # ── Étape 3 : mise à jour cache Parquet (délégué) ────────────────────
+        # Réutilise les bytes déjà téléchargés — pas de second appel réseau.
         if tu_bytes and sa_bytes:
-            self._refresh_parquet_cache(tu_bytes, sa_bytes)
+            self._cache_updater.update(tu_bytes, sa_bytes)
 
-        # ── Étape 4 : construire et retourner le RealtimeUpdate ───────────────
+        # ── Étape 4 : retourner le RealtimeUpdate ─────────────────────────────
         has_changed = bool(delayed or cancelled)
         update = RealtimeUpdate(
             has_changed=has_changed,
@@ -99,35 +114,11 @@ class RealtimeFetcher:
 
         return update
 
-    # ── Pipeline 2 — Cache Parquet pour le ML ────────────────────────────────
-
-    def _refresh_parquet_cache(self, tu_bytes: bytes, sa_bytes: bytes) -> None:
-        """
-        Alimente le cache Parquet utilisé par GTFSRealtimeFeatureTransformer.
-
-        Réutilise les bytes déjà téléchargés — pas de second appel réseau.
-        GTFSRTParser (ml_engine) décode le protobuf en DataFrames pandas,
-        GTFSRTCache persiste en Parquet avec horodatage TTL.
-
-        En cas d'erreur : log + continue sans planter le scheduler.
-        """
-        try:
-            rt_data = self._parser_ml.parse(tu_bytes, sa_bytes)
-            self._cache.save(rt_data.stop_time_updates, rt_data.cancelled_trips)
-            print(
-                f"[RealtimeFetcher] Cache Parquet mis a jour — "
-                f"{len(rt_data.stop_time_updates):,} stop updates, "
-                f"{len(rt_data.cancelled_trips):,} trips annules."
-            )
-        except Exception as exc:
-            print(f"[RealtimeFetcher] Cache Parquet erreur (non bloquant) : {exc}")
-
-    # ── Pipeline 1 — Détection de changements (JSON) ─────────────────────────
+    # ── Pipeline détection — Trip Updates ────────────────────────────────────
 
     def _run_detection_trip_updates(self, raw_bytes: bytes | None) -> set[str]:
         """
         Détecte les changements dans le flux Trip Updates.
-
         Retourne les trip_ids en retard > DELAY_THRESHOLD_SECONDS.
         Retourne set vide si bytes absents ou pas de changement.
         """
@@ -160,7 +151,6 @@ class RealtimeFetcher:
     def _run_detection_service_alerts(self, raw_bytes: bytes | None) -> set[str]:
         """
         Détecte les changements dans le flux Service Alerts.
-
         Retourne les trip_ids supprimés (effect = NO_SERVICE).
         Retourne set vide si bytes absents ou pas de changement.
         """
@@ -195,10 +185,8 @@ class RealtimeFetcher:
     def _fetch_bytes(self, url: str, label: str) -> bytes | None:
         """
         Télécharge les bytes bruts d'un flux RT.
-
-        Retourne None en cas d'erreur réseau sans propager l'exception —
-        le scheduler doit continuer même si un flux est indisponible.
-        Les bytes sont réutilisés par les deux pipelines (pas de double fetch).
+        Retourne None en cas d'erreur réseau sans propager l'exception.
+        Les bytes sont réutilisés par détection ET cache (pas de double fetch).
         """
         try:
             proxies = (
