@@ -6,17 +6,16 @@ Séquence complète :
     │  GTFS  →  Fusion RT  →  Graphe temps-étendu  →  Scores ML  →  OR   │
     └─────────────────────────────────────────────────────────────────────┘
 
-Principes SOLID :
-    S — chaque fonction a une responsabilité unique et documentée
-    O — inject_scores est ouvert à d'autres scorers (rule-based, etc.)
-    L — le solver ne dépend pas du type concret d'optimiseur
-    I — interfaces séparées pour scoring et optimisation
-    D — dépendances via injection (predict_url configurable pour les tests)
+Changement v2 :
+    run() accepte un paramètre optionnel gare_arrivee_id.
+    Il est propagé directement à OrienteeringOptimizer.solve().
+    Toute la logique de contrainte de retour vit dans l'optimiseur.
 """
 from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import Optional
 
 import httpx
 import pandas as pd
@@ -35,11 +34,11 @@ from shared.schemas import (
     PredictScoreItem,
     TronconInput,
 )
+from shared.config import config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PREDICT_API_URL = "http://api:8000/predict/batch"
-
+DEFAULT_PREDICT_API_URL = config.PREDICT_API_URL
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1 : Injection des scores dans le graphe
@@ -54,9 +53,6 @@ def inject_scores(
 
     Pondération par efficacité terrain :
         score_effectif = score_ml × min(1.0, duration_min / CONTROL_SATURATION_MINUTES)
-        Un tronçon de 7 min ne permet pas un contrôle complet — son score est réduit.
-
-    Complexité : O(|scores| + |arcs|) — linéaire.
     """
     if not scores:
         logger.debug("[inject_scores] Liste vide — graphe non modifié.")
@@ -67,13 +63,7 @@ def inject_scores(
     _log_injection_report(n_injected, n_missed)
 
 
-def _build_score_lookup(
-    scores: list[PredictScoreItem],
-) -> dict[tuple[str, str, int], float]:
-    """
-    Construit le dictionnaire de lookup (trip_id, stop_id_dep, dep_minutes) → score.
-    Responsabilité unique : transformer la liste de scores en structure O(1).
-    """
+def _build_score_lookup(scores: list[PredictScoreItem]) -> dict[tuple, float]:
     return {
         (s.trip_id, s.stop_id_dep, s.dep_minutes): s.fraud_score
         for s in scores
@@ -82,15 +72,10 @@ def _build_score_lookup(
 
 def _apply_scores_to_graph(
     graph: dict[Node, list[Arc]],
-    score_lookup: dict[tuple[str, str, int], float],
+    score_lookup: dict[tuple, float],
 ) -> tuple[int, int]:
-    """
-    Itère sur le graphe et injecte les scores ML pondérés sur les arcs TRAIN.
-    Retourne (nb_injectés, nb_manquants).
-    """
     n_injected = 0
     n_missed   = 0
-
     for arcs in graph.values():
         for arc in arcs:
             if arc.arc_type != ArcType.TRAIN:
@@ -101,25 +86,15 @@ def _apply_scores_to_graph(
                 n_injected += 1
             else:
                 n_missed += 1
-                logger.debug(
-                    "[inject_scores] Arc sans score ML : trip=%s gare=%s dep=%d",
-                    arc.trip_id, arc.source.stop_id, arc.source.time_minutes,
-                )
-
     return n_injected, n_missed
 
 
 def _weighted_score(raw_score: float, duration_min: int) -> float:
-    """
-    Pondère le score brut ML par l'efficacité terrain du contrôle.
-    Responsabilité unique : encapsuler la formule de pondération.
-    """
     efficacite = min(1.0, duration_min / CONTROL_SATURATION_MINUTES)
     return raw_score * efficacite
 
 
 def _log_injection_report(n_injected: int, n_missed: int) -> None:
-    """Log le rapport d'injection. Responsabilité unique : reporting."""
     if n_missed > 0:
         logger.warning(
             "[inject_scores] %d arc(s) sans score ML. %d scorés avec succès.",
@@ -165,24 +140,14 @@ def fetch_scores_from_api(
     return []
 
 
-def _build_predict_request(
-    troncons_df: pd.DataFrame,
-    service_date: date,
-) -> PredictRequest:
-    """
-    Convertit un DataFrame de tronçons en PredictRequest.
-    Propage service_date pour que TemporalFeatureTransformer calcule
-    is_weekend, is_vacances, is_peak_hour, etc.
-    """
-    troncons_input = [
+def _build_predict_request(troncons_df: pd.DataFrame, service_date: date) -> PredictRequest:
+    return PredictRequest(troncons=[
         _row_to_troncon_input(row, service_date)
         for _, row in troncons_df.iterrows()
-    ]
-    return PredictRequest(troncons=troncons_input)
+    ])
 
 
 def _row_to_troncon_input(row: pd.Series, service_date: date) -> TronconInput:
-    """Convertit une ligne DataFrame en TronconInput. Responsabilité unique."""
     return TronconInput(
         trip_id=str(row["trip_id"]),
         train_number=str(row.get("train_number", "")),
@@ -204,11 +169,7 @@ def _row_to_troncon_input(row: pd.Series, service_date: date) -> TronconInput:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_gtfs_troncons(service_date: date) -> pd.DataFrame:
-    """
-    Charge et filtre les tronçons GTFS TER pour une date de service.
-    Responsabilité unique : isolation de la couche d'accès aux données GTFS statiques.
-    """
-    loader = GTFSLoader()
+    loader         = GTFSLoader()
     stop_times     = loader.load_stop_times()
     trips          = loader.load_trips()
     stops          = loader.load_stops()
@@ -222,9 +183,7 @@ def _load_gtfs_troncons(service_date: date) -> pd.DataFrame:
     ]["service_id"].tolist()
 
     if not services_du_jour:
-        raise ValueError(
-            f"[solver] Aucun service GTFS pour la date {service_date}."
-        )
+        raise ValueError(f"[solver] Aucun service GTFS pour la date {service_date}.")
 
     trips_du_jour = trips[trips["service_id"].isin(services_du_jour)]
     preprocessor  = GTFSPreprocessor()
@@ -236,26 +195,10 @@ def _load_gtfs_troncons(service_date: date) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 4 : Enrichissement GTFS-RT (retards + annulations)
+# Phase 4 : Enrichissement GTFS-RT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _apply_gtfs_rt(troncons_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Enrichit les tronçons statiques avec les données temps réel.
-
-    Responsabilité unique : fusionner GTFS statique avec le cache RT
-    et filtrer les trains annulés.
-
-    Les tronçons annulés sont retirés du DataFrame — un train supprimé
-    ne doit jamais apparaître dans la tournée d'un agent.
-
-    Les retards (delay_dep_sec, delay_arr_sec) sont conservés dans le
-    DataFrame pour usage futur (ajustement des horaires de correspondance).
-
-    Dégradation gracieuse :
-        Si le cache RT est indisponible, retourne les tronçons statiques
-        sans modification. La tournée reste valide mais sans info temps réel.
-    """
     try:
         cache = GTFSRTCache()
         stop_updates, cancelled_trips = cache.load()
@@ -266,7 +209,6 @@ def _apply_gtfs_rt(troncons_df: pd.DataFrame) -> pd.DataFrame:
 
         merger      = GTFSRTMerger()
         troncons_rt = merger.merge(troncons_df, stop_updates, cancelled_trips)
-
         troncons_rt, nb_annules = _filter_cancelled(troncons_rt)
         nb_retards = _count_delayed(troncons_rt)
 
@@ -277,17 +219,11 @@ def _apply_gtfs_rt(troncons_df: pd.DataFrame) -> pd.DataFrame:
         return troncons_rt
 
     except Exception as e:
-        logger.warning(
-            "[solver] ⚠️ GTFS-RT indisponible (%s) — tronçons statiques utilisés.", e
-        )
+        logger.warning("[solver] ⚠️ GTFS-RT indisponible (%s) — tronçons statiques utilisés.", e)
         return troncons_df
 
 
 def _filter_cancelled(troncons_rt: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """
-    Retire les tronçons annulés du DataFrame.
-    Retourne (DataFrame filtré, nombre de tronçons retirés).
-    """
     if "is_cancelled" not in troncons_rt.columns:
         return troncons_rt, 0
     nb_avant   = len(troncons_rt)
@@ -297,7 +233,6 @@ def _filter_cancelled(troncons_rt: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 def _count_delayed(troncons_rt: pd.DataFrame) -> int:
-    """Retourne le nombre de tronçons avec un retard au départ > 0."""
     if "delay_dep_sec" not in troncons_rt.columns:
         return 0
     return int((troncons_rt["delay_dep_sec"] > 0).sum())
@@ -313,6 +248,7 @@ def run(
     heure_depart_min: int,
     duree_max_minutes: int = 360,
     predict_url: str = DEFAULT_PREDICT_API_URL,
+    gare_arrivee_id: Optional[str] = None,   # ← NOUVEAU v2
 ) -> dict:
     """
     Orchestre la génération complète d'une tournée optimisée.
@@ -322,17 +258,24 @@ def run(
         2. Fusion GTFS-RT (retire les annulés, ajoute les retards)
         3. Graphe temps-étendu
         4. Scores ML
-        5. OrienteeringOptimizer
+        5. OrienteeringOptimizer (avec contrainte de retour si gare_arrivee_id)
+
+    Paramètres :
+        gare_arrivee_id : code UIC 8 chiffres de la gare d'arrivée.
+                          None = tournée libre (comportement v1).
+                          Fourni = contrainte stricte de terminaison.
 
     Lève :
         FileNotFoundError : GTFS non disponible
-        ValueError        : date hors calendrier, gare inconnue, tournée impossible
+        ValueError        : date hors calendrier, gare inconnue,
+                            tournée impossible, contrainte retour infaisable
     """
     logger.info(
-        "[solver] ══ Démarrage ══ date=%s | gare=%s | %02dh%02d | max=%dmin",
+        "[solver] ══ Démarrage ══ date=%s | départ=%s | %02dh%02d | max=%dmin | retour=%s",
         service_date, gare_depart_id,
         heure_depart_min // 60, heure_depart_min % 60,
         duree_max_minutes,
+        gare_arrivee_id or "libre",
     )
 
     troncons_df = _load_gtfs_troncons(service_date)
@@ -353,6 +296,7 @@ def run(
         gare_depart_id=gare_depart_id,
         heure_depart_min=heure_depart_min,
         duree_max_minutes=duree_max_minutes,
+        gare_arrivee_id=gare_arrivee_id,   # ← propagé
     )
 
     logger.info(
