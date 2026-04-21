@@ -17,7 +17,32 @@ class ArcType(Enum):
     CORRESPONDANCE = "correspondance"  # attente entre deux trains en gare
 
 
-@dataclass
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX B8 — frozen=True + eq=False sur Node
+#
+# AVANT : @dataclass sans frozen=True
+#   → Node était MUTABLE mais possédait un __hash__ manuel.
+#   → Un Node pouvait être modifié après avoir été inséré dans un dict ou un set,
+#     cassant silencieusement la cohérence du graphe (le hash ne correspondait
+#     plus à la clé réelle dans la table de hachage).
+#
+# APRÈS : @dataclass(frozen=True, eq=False)
+#   frozen=True  → Python lève AttributeError à tout setattr après __post_init__.
+#                  Le Node est garanti immuable pour toute la durée de vie du graphe.
+#   eq=False     → On désactive la génération automatique de __eq__ et __hash__
+#                  par le décorateur. Nos méthodes manuelles prennent le relais.
+#                  CRITIQUE : le __hash__ auto (frozen=True, eq=True) inclut
+#                  stop_name — ce que l'on veut ÉVITER car deux nœuds identiques
+#                  peuvent avoir des variantes de nom SNCF légèrement différentes.
+#                  Nos méthodes n'utilisent que (stop_id, time_minutes, service_date).
+#
+# Compatibilité avec __post_init__ :
+#   frozen=True bloque uniquement les setattr après la construction.
+#   La validation dans __post_init__ (if self.time_minutes < 0) est une LECTURE,
+#   pas une écriture → aucun problème.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True, eq=False)
 class Node:
     """
     Un nœud du graphe temps-étendu.
@@ -31,12 +56,15 @@ class Node:
         time_minutes : heure en minutes depuis minuit (ex: 503 pour 08:23)
         service_date : date de circulation
 
-    Pourquoi frozen=True ?
-        Un nœud ne doit jamais être modifié après création.
-        frozen=True rend la dataclass immuable ET hashable — ce qui permet
-        de l'utiliser comme clé de dictionnaire ou élément de set.
-        Sans ça, on ne pourrait pas construire un graphe avec des nœuds
-        comme clés.
+    Pourquoi frozen=True, eq=False ?
+        frozen=True  → immuabilité garantie. Un Node inséré dans un dict ou un set
+                       ne peut plus être modifié. Sans frozen, on risque de corrompre
+                       silencieusement la table de hachage du graphe.
+        eq=False     → on conserve nos __hash__ et __eq__ personnalisés qui excluent
+                       stop_name du hash. Deux nœuds identiques (même stop_id, même
+                       heure, même date) sont "égaux" même si leur nom diffère
+                       légèrement (variantes de nommage SNCF : "Strasbourg" vs
+                       "Strasbourg-Ville").
     """
     stop_id: str
     stop_name: str
@@ -44,11 +72,20 @@ class Node:
     service_date: date
 
     def __post_init__(self):
-        # Validation fail-fast
+        """
+        Validation fail-fast à la construction.
+
+        Avec frozen=True, __post_init__ ne peut PAS écrire dans self.
+        C'est correct ici car on ne fait que lire time_minutes pour valider.
+        Si une validation nécessitait de corriger une valeur, il faudrait utiliser
+        object.__setattr__(self, "champ", valeur_corrigee).
+        """
         if self.time_minutes < 0:
             raise ValueError(
                 f"[Node] time_minutes ne peut pas être négatif : {self.time_minutes}"
             )
+
+    # ── Propriétés calculées ──────────────────────────────────────────────────
 
     @property
     def hour(self) -> int:
@@ -62,16 +99,27 @@ class Node:
         m = self.time_minutes % 60
         return f"{self.stop_name} {h:02d}:{m:02d}"
 
+    # ── Hash & Égalité personnalisés (excluent stop_name) ─────────────────────
+
     def __hash__(self):
         """
-        Hashable sur (stop_id, time_minutes, service_date).
-        stop_name exclu du hash : deux nœuds avec le même stop_id,
-        la même heure et la même date sont le même nœud même si
-        le nom diffère légèrement (variantes SNCF).
+        Hash sur (stop_id, time_minutes, service_date).
+
+        stop_name est exclu intentionnellement :
+            Deux nœuds avec le même stop_id, la même heure et la même date
+            représentent le MÊME point dans le graphe, même si le nom diffère
+            légèrement selon la source (GTFS static vs GTFS-RT vs historique LAF).
+            Les inclure casserait les lookups dans les dicts/sets du graphe.
         """
         return hash((self.stop_id, self.time_minutes, self.service_date))
 
     def __eq__(self, other):
+        """
+        Égalité sur (stop_id, time_minutes, service_date).
+
+        Cohérent avec __hash__ : deux objets égaux doivent avoir le même hash.
+        stop_name exclu pour les mêmes raisons que dans __hash__.
+        """
         if not isinstance(other, Node):
             return False
         return (
@@ -97,6 +145,11 @@ class Arc:
         train_number : numéro commercial du train (None pour correspondance)
         fraud_score  : score de fraude du tronçon (0.0 par défaut, mis à jour
                        par le modèle ML après entraînement)
+
+    Pourquoi Arc n'est PAS frozen ?
+        fraud_score est initialisé à 0.0 à la construction du graphe, puis injecté
+        par le pipeline ML via inject_scores(). Cette mutation est intentionnelle
+        et documentée. Rendre Arc frozen casserait l'injection de scores.
 
     Pourquoi fraud_score est initialisé à 0.0 ?
         À la construction du graphe, on ne connaît pas encore le score ML.
