@@ -148,11 +148,18 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         raise HTTPException(status_code=500, detail=f"Erreur interne : {e}")
 
     if not result["arcs"]:
-        raise HTTPException(
-            status_code=404,
-            detail="Impossible de construire une tournée depuis cette gare et cette heure.",
+        nb_trains_reels = sum(
+            1 for a in result["arcs"]
+            if a.arc_type == ArcType.TRAIN
         )
-
+        if nb_trains_reels == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Aucune tournée possible depuis cette gare dans cette fenêtre. "
+                    "Essayez le mode 'decouche' ou élargissez la plage PS/FS."
+                )
+            )
     # ── Calcul score_perte_pct ────────────────────────────────────────────────
     score_perte_pct = 0.0
     if score_libre is not None and score_libre > 0:
