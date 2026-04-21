@@ -69,6 +69,7 @@ WORKDIR /app
 COPY --chown=sadlaf:sadlaf services/api/        ./services/api/
 COPY --chown=sadlaf:sadlaf services/ml_engine/  ./services/ml_engine/
 COPY --chown=sadlaf:sadlaf services/or_engine/  ./services/or_engine/
+COPY --chown=sadlaf:sadlaf services/exporter/   ./services/exporter/
 COPY --chown=sadlaf:sadlaf shared/              ./shared/
 COPY --chown=sadlaf:sadlaf config/              ./config/
 
