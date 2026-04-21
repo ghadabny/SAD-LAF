@@ -1,15 +1,35 @@
+# services/or_engine/solver.py
 """
-services/or_engine/solver.py — Orchestration de la génération de tournées.
+SOLID — DIP (v2) :
+    Introduction de TourneeOrchestrator — classe qui reçoit toutes ses
+    dépendances par injection plutôt que de les instancier elle-même.
 
-Séquence complète :
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  GTFS  →  Fusion RT  →  Graphe temps-étendu  →  Scores ML  →  OR   │
-    └─────────────────────────────────────────────────────────────────────┘
+Avant :
+    def run(...):
+        loader       = GTFSLoader()           # concret — impossible à mocker proprement
+        preprocessor = GTFSPreprocessor()     # concret
+        cache        = GTFSRTCache()          # concret
+        merger       = GTFSRTMerger()         # concret
+        builder      = TimeExpandedGraphBuilder()   # concret
+        optimizer    = OrienteeringOptimizer(...)   # concret
 
-Changement v2 :
-    run() accepte un paramètre optionnel gare_arrivee_id.
-    Il est propagé directement à OrienteeringOptimizer.solve().
-    Toute la logique de contrainte de retour vit dans l'optimiseur.
+Après :
+    class TourneeOrchestrator:
+        def __init__(self, loader=None, preprocessor=None, ...):
+            self._loader = loader or GTFSLoader()   # injectable
+
+    # Compatibilité backward — optimize_v2.py n'a pas à changer
+    def run(...) -> dict:
+        return TourneeOrchestrator().run(...)
+
+Usage test :
+    orchestrator = TourneeOrchestrator(
+        loader=FakeLoader(),
+        preprocessor=FakePreprocessor(),
+        rt_cache=FakeCache(),
+    )
+    result = orchestrator.run(service_date=..., ...)
+    → aucun fichier GTFS requis, aucun appel API réseau
 """
 from __future__ import annotations
 
@@ -39,6 +59,7 @@ from shared.config import config
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREDICT_API_URL = config.PREDICT_API_URL
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 1 : Injection des scores dans le graphe
@@ -165,63 +186,182 @@ def _row_to_troncon_input(row: pd.Series, service_date: date) -> TronconInput:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 3 : Chargement GTFS statique
+# TourneeOrchestrator — classe principale avec injection de dépendances (DIP)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_gtfs_troncons(service_date: date) -> pd.DataFrame:
-    loader         = GTFSLoader()
-    stop_times     = loader.load_stop_times()
-    trips          = loader.load_trips()
-    stops          = loader.load_stops()
-    routes         = loader.load_routes()
-    calendar_dates = loader.load_calendar_dates()
+class TourneeOrchestrator:
+    """
+    Orchestre la génération complète d'une tournée optimisée.
 
-    date_int = int(service_date.strftime("%Y%m%d"))
-    services_du_jour = calendar_dates[
-        (calendar_dates["date"] == date_int) &
-        (calendar_dates["exception_type"] == 1)
-    ]["service_id"].tolist()
+    SOLID — DIP :
+        Toutes les dépendances sont injectables via le constructeur.
+        Les valeurs par défaut instancient les classes de production.
+        En test, on injecte des doublures sans fichiers GTFS ni appels réseau.
 
-    if not services_du_jour:
-        raise ValueError(f"[solver] Aucun service GTFS pour la date {service_date}.")
+    Usage production :
+        orchestrator = TourneeOrchestrator()
+        tournee = orchestrator.run(service_date=..., ...)
 
-    trips_du_jour = trips[trips["service_id"].isin(services_du_jour)]
-    preprocessor  = GTFSPreprocessor()
-    troncons_df   = preprocessor.build_troncons(
-        stop_times, trips_du_jour, stops, routes, ter_only=True
-    )
-    troncons_df["service_date"] = service_date
-    return troncons_df
+    Usage test :
+        orchestrator = TourneeOrchestrator(
+            loader=FakeGTFSLoader(),
+            rt_cache=FakeRTCache(),
+        )
+        tournee = orchestrator.run(...)
+    """
 
+    def __init__(
+        self,
+        loader:        GTFSLoader              | None = None,
+        preprocessor:  GTFSPreprocessor        | None = None,
+        rt_cache:      GTFSRTCache             | None = None,
+        rt_merger:     GTFSRTMerger            | None = None,
+        graph_builder: TimeExpandedGraphBuilder | None = None,
+        optimizer:     OrienteeringOptimizer    | None = None,
+    ) -> None:
+        """
+        Paramètres (tous optionnels) :
+            loader        : lit les fichiers GTFS .txt depuis le disque
+            preprocessor  : construit les tronçons depuis les tables GTFS
+            rt_cache      : lit le cache Parquet GTFS-RT
+            rt_merger     : joint les tronçons statiques avec les données RT
+            graph_builder : construit le graphe temps-étendu
+            optimizer     : résout le problème d'orienteering (MILP + fallback greedy)
+        """
+        self._loader        = loader        or GTFSLoader()
+        self._preprocessor  = preprocessor  or GTFSPreprocessor()
+        self._rt_cache      = rt_cache      or GTFSRTCache()
+        self._rt_merger     = rt_merger     or GTFSRTMerger()
+        self._graph_builder = graph_builder or TimeExpandedGraphBuilder()
+        self._optimizer     = optimizer     or OrienteeringOptimizer(time_limit_seconds=30)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 4 : Enrichissement GTFS-RT
-# ─────────────────────────────────────────────────────────────────────────────
+    # ── Interface publique ────────────────────────────────────────────────────
 
-def _apply_gtfs_rt(troncons_df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        cache = GTFSRTCache()
-        stop_updates, cancelled_trips = cache.load()
+    def run(
+        self,
+        service_date:     date,
+        gare_depart_id:   str,
+        heure_depart_min: int,
+        duree_max_minutes: int = 360,
+        predict_url:      str = DEFAULT_PREDICT_API_URL,
+        gare_arrivee_id:  Optional[str] = None,
+    ) -> dict:
+        """
+        Orchestre la génération complète d'une tournée optimisée.
 
-        if stop_updates.empty and cancelled_trips.empty:
-            logger.info("[solver] Cache RT vide — tronçons statiques utilisés.")
-            return troncons_df
+        Séquence :
+            1. GTFS statique     → tronçons du jour
+            2. GTFS-RT           → retire les annulés, ajoute les retards
+            3. Graphe            → temps-étendu (Node/Arc)
+            4. Scores ML         → API predict/batch
+            5. Optimisation OR   → OrienteeringOptimizer (MILP + greedy fallback)
 
-        merger      = GTFSRTMerger()
-        troncons_rt = merger.merge(troncons_df, stop_updates, cancelled_trips)
-        troncons_rt, nb_annules = _filter_cancelled(troncons_rt)
-        nb_retards = _count_delayed(troncons_rt)
+        Paramètres :
+            gare_arrivee_id : code UIC 8 chiffres de la gare d'arrivée.
+                              None = tournée libre.
+                              Fourni = contrainte stricte de terminaison.
+
+        Lève :
+            FileNotFoundError : GTFS non disponible
+            ValueError        : date hors calendrier, gare inconnue,
+                                tournée impossible, contrainte retour infaisable
+        """
+        logger.info(
+            "[solver] ══ Démarrage ══ date=%s | départ=%s | %02dh%02d | max=%dmin | retour=%s",
+            service_date, gare_depart_id,
+            heure_depart_min // 60, heure_depart_min % 60,
+            duree_max_minutes,
+            gare_arrivee_id or "libre",
+        )
+
+        troncons_df = self._load_gtfs_troncons(service_date)
+        logger.info("[solver] %d tronçons TER statiques chargés.", len(troncons_df))
+
+        troncons_df = self._apply_gtfs_rt(troncons_df)
+        logger.info("[solver] %d tronçons après fusion RT.", len(troncons_df))
+
+        graph  = self._graph_builder.build(troncons_df, service_date)
+        scores = fetch_scores_from_api(troncons_df, service_date, predict_url)
+        inject_scores(graph, scores)
+
+        tournee = self._optimizer.solve(
+            graph=graph,
+            gare_depart_id=gare_depart_id,
+            heure_depart_min=heure_depart_min,
+            duree_max_minutes=duree_max_minutes,
+            gare_arrivee_id=gare_arrivee_id,
+        )
 
         logger.info(
-            "[solver] GTFS-RT : %d tronçons annulés retirés | %d avec retard.",
-            nb_annules, nb_retards,
+            "[solver] ══ Tournée ══ %d trains | score=%.4f | durée=%dmin",
+            tournee["nb_trains"], tournee["score_total"], tournee["duree_minutes"],
         )
-        return troncons_rt
+        return tournee
 
-    except Exception as e:
-        logger.warning("[solver] ⚠️ GTFS-RT indisponible (%s) — tronçons statiques utilisés.", e)
+    # ── Méthodes privées ─────────────────────────────────────────────────────
+
+    def _load_gtfs_troncons(self, service_date: date) -> pd.DataFrame:
+        """
+        Charge les tronçons GTFS statiques filtrés sur la date de service.
+
+        Utilise self._loader et self._preprocessor (injectables).
+        """
+        stop_times     = self._loader.load_stop_times()
+        trips          = self._loader.load_trips()
+        stops          = self._loader.load_stops()
+        routes         = self._loader.load_routes()
+        calendar_dates = self._loader.load_calendar_dates()
+
+        date_int = int(service_date.strftime("%Y%m%d"))
+        services_du_jour = calendar_dates[
+            (calendar_dates["date"] == date_int) &
+            (calendar_dates["exception_type"] == 1)
+        ]["service_id"].tolist()
+
+        if not services_du_jour:
+            raise ValueError(f"[solver] Aucun service GTFS pour la date {service_date}.")
+
+        trips_du_jour = trips[trips["service_id"].isin(services_du_jour)]
+        troncons_df   = self._preprocessor.build_troncons(
+            stop_times, trips_du_jour, stops, routes, ter_only=True
+        )
+        troncons_df["service_date"] = service_date
         return troncons_df
 
+    def _apply_gtfs_rt(self, troncons_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Enrichit les tronçons avec les données temps réel (retards, annulations).
+
+        Utilise self._rt_cache et self._rt_merger (injectables).
+        Fallback silencieux si le cache est vide ou corrompu.
+        """
+        try:
+            stop_updates, cancelled_trips = self._rt_cache.load()
+
+            if stop_updates.empty and cancelled_trips.empty:
+                logger.info("[solver] Cache RT vide — tronçons statiques utilisés.")
+                return troncons_df
+
+            troncons_rt = self._rt_merger.merge(troncons_df, stop_updates, cancelled_trips)
+            troncons_rt, nb_annules = _filter_cancelled(troncons_rt)
+            nb_retards = _count_delayed(troncons_rt)
+
+            logger.info(
+                "[solver] GTFS-RT : %d tronçons annulés retirés | %d avec retard.",
+                nb_annules, nb_retards,
+            )
+            return troncons_rt
+
+        except Exception as e:
+            logger.warning(
+                "[solver] ⚠️ GTFS-RT indisponible (%s) — tronçons statiques utilisés.", e
+            )
+            return troncons_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers module-level (inchangés)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _filter_cancelled(troncons_rt: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     if "is_cancelled" not in troncons_rt.columns:
@@ -239,68 +379,34 @@ def _count_delayed(troncons_rt: pd.DataFrame) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Orchestration principale
+# Shim de compatibilité backward
+# ─────────────────────────────────────────────────────────────────────────────
+# optimize_v2.py appelle solver.run(...) directement.
+# Ce shim garantit qu'aucun fichier appelant ne change.
+# Il crée un TourneeOrchestrator avec les dépendances par défaut.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(
-    service_date: date,
-    gare_depart_id: str,
-    heure_depart_min: int,
+    service_date:      date,
+    gare_depart_id:    str,
+    heure_depart_min:  int,
     duree_max_minutes: int = 360,
-    predict_url: str = DEFAULT_PREDICT_API_URL,
-    gare_arrivee_id: Optional[str] = None,   # ← NOUVEAU v2
+    predict_url:       str = DEFAULT_PREDICT_API_URL,
+    gare_arrivee_id:   Optional[str] = None,
 ) -> dict:
     """
-    Orchestre la génération complète d'une tournée optimisée.
+    Shim de compatibilité — délègue à TourneeOrchestrator().run().
 
-    Séquence :
-        1. GTFS statique
-        2. Fusion GTFS-RT (retire les annulés, ajoute les retards)
-        3. Graphe temps-étendu
-        4. Scores ML
-        5. OrienteeringOptimizer (avec contrainte de retour si gare_arrivee_id)
-
-    Paramètres :
-        gare_arrivee_id : code UIC 8 chiffres de la gare d'arrivée.
-                          None = tournée libre (comportement v1).
-                          Fourni = contrainte stricte de terminaison.
-
-    Lève :
-        FileNotFoundError : GTFS non disponible
-        ValueError        : date hors calendrier, gare inconnue,
-                            tournée impossible, contrainte retour infaisable
+    Tous les appelants existants (optimize_v2.py, tests, etc.) continuent
+    d'appeler solver.run() sans modification.
+    Pour injecter des dépendances (tests unitaires), utiliser directement :
+        TourneeOrchestrator(loader=..., ...).run(...)
     """
-    logger.info(
-        "[solver] ══ Démarrage ══ date=%s | départ=%s | %02dh%02d | max=%dmin | retour=%s",
-        service_date, gare_depart_id,
-        heure_depart_min // 60, heure_depart_min % 60,
-        duree_max_minutes,
-        gare_arrivee_id or "libre",
-    )
-
-    troncons_df = _load_gtfs_troncons(service_date)
-    logger.info("[solver] %d tronçons TER statiques chargés.", len(troncons_df))
-
-    troncons_df = _apply_gtfs_rt(troncons_df)
-    logger.info("[solver] %d tronçons après fusion RT.", len(troncons_df))
-
-    builder = TimeExpandedGraphBuilder()
-    graph   = builder.build(troncons_df, service_date)
-
-    scores = fetch_scores_from_api(troncons_df, service_date, predict_url)
-    inject_scores(graph, scores)
-
-    optimizer = OrienteeringOptimizer(time_limit_seconds=30)
-    tournee   = optimizer.solve(
-        graph=graph,
+    return TourneeOrchestrator().run(
+        service_date=service_date,
         gare_depart_id=gare_depart_id,
         heure_depart_min=heure_depart_min,
         duree_max_minutes=duree_max_minutes,
-        gare_arrivee_id=gare_arrivee_id,   # ← propagé
+        predict_url=predict_url,
+        gare_arrivee_id=gare_arrivee_id,
     )
-
-    logger.info(
-        "[solver] ══ Tournée ══ %d trains | score=%.4f | durée=%dmin",
-        tournee["nb_trains"], tournee["score_total"], tournee["duree_minutes"],
-    )
-    return tournee
