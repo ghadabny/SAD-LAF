@@ -337,7 +337,9 @@ class ServiceAlertSchema(BaseModel):
     affected_trips: list[str]     = []
     affected_stops: list[str]     = []
 
-
+    @property                                          # ← ajouter ces 3 lignes
+    def is_suppression(self) -> bool:
+        return self.effect == "NO_SERVICE"
 # ─────────────────────────────────────────────────────────────────────────────
 # API — Schemas génériques
 # ─────────────────────────────────────────────────────────────────────────────
