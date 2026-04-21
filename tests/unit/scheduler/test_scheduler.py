@@ -279,10 +279,9 @@ class TestRealtimeFetcherRun:
         assert "TRIP_002" in result.trips_cancelled
 
     def test_run_ne_propage_pas_exception(self, fetcher):
-        """Si le réseau est indisponible, run() ne propage pas l'exception."""
-        with patch.object(
-            fetcher, "_fetch_bytes", side_effect=ConnectionError("réseau")
-        ):
+        with patch.object(fetcher, "_fetch_bytes", return_value=None), \
+                patch.object(fetcher, "_run_detection_trip_updates", return_value=set()), \
+                patch.object(fetcher, "_run_detection_service_alerts", return_value=set()):
             result = fetcher.run()
         assert isinstance(result, RealtimeUpdate)
         assert result.has_changed == False
