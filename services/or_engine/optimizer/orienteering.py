@@ -2,7 +2,7 @@
 """
 Solveur MILP pour le Problème d'Orienteering ferroviaire LAF.
 
-Formulation mathématique :
+Formulation mathématique (v2 — avec contrainte de retour optionnelle) :
 ─────────────────────────────────────────────────────────────────────────────
 Variables de décision :
     x[i] ∈ {0, 1}  — 1 si l'arc i est emprunté dans la tournée
@@ -14,19 +14,21 @@ Contraintes :
     C1 — Budget temps :
          Σ  duration_min[i] × x[i]  ≤  duree_max_minutes
 
-    C2 — Continuité de flux à chaque nœud intermédiaire :
-         Σ x[arc entrant vers n]  =  Σ x[arc sortant de n]
+    C2a — Continuité de flux (nœuds intermédiaires, ≠ source, ≠ sink) :
+          Σ x[arc entrant vers n]  =  Σ x[arc sortant de n]
 
-    C3 — Source unique :
-         Σ x[arc sortant de noeud_depart]  =  1
+    C2b — Sink agrégé (si gare_arrivee_id fourni) :
+          Σ x[entrants vers n ∈ Sink] − Σ x[sortants de n ∈ Sink]  =  1
+          où Sink = {n | n.stop_id == gare_arrivee_id}
 
-    C4 — Domaine des variables :
-         x[i] ∈ {0, 1}
+    C3  — Source unique :
+          Σ x[arc sortant de noeud_depart]  =  1
+
+    C4  — Domaine des variables :
+          x[i] ∈ {0, 1}
 
 Solveur : CBC (COIN-OR Branch and Cut) via PuLP — open source, sans licence.
-
-Dégradation gracieuse :
-    Si PuLP/CBC n'est pas installé → fallback automatique vers le greedy.
+Dégradation gracieuse : fallback greedy si PuLP/CBC absent ou infaisable.
 """
 from __future__ import annotations
 
@@ -44,20 +46,10 @@ class OrienteeringOptimizer(BaseOptimizer):
     """
     Implémentation MILP du Problème d'Orienteering ferroviaire.
 
-    Hérite de BaseOptimizer — solver.run() peut l'utiliser sans
-    connaître son type concret (principe D de SOLID).
-
-    SOLID — principe S :
-        Chaque méthode privée a une responsabilité unique et documentée.
-        _solve_milp() orchestre ; les étapes sont déléguées à des méthodes
-        dédiées : _build_subgraph, _build_model, _build_flow_index,
-        _add_objective, _add_budget_constraint, _add_flow_constraints,
-        _add_source_constraint, _run_cbc, _extract_active_arcs,
-        _build_result.
-
-    Usage :
-        optimizer = OrienteeringOptimizer(time_limit_seconds=30)
-        result    = optimizer.solve(graph, "87212027", 480, 360)
+    Nouveauté v2 : paramètre gare_arrivee_id optionnel dans solve().
+    Si fourni, le chemin DOIT terminer dans cette gare (contrainte C2b).
+    Le solveur lève ValueError si aucune solution n'est feasible avec
+    cette contrainte — le router doit en informer l'agent.
     """
 
     def __init__(self, time_limit_seconds: int = 30):
@@ -71,22 +63,26 @@ class OrienteeringOptimizer(BaseOptimizer):
         gare_depart_id: str,
         heure_depart_min: int,
         duree_max_minutes: int,
+        gare_arrivee_id: Optional[str] = None,   # ← NOUVEAU v2
     ) -> dict:
         """
         Résout le problème d'Orienteering via MILP (PuLP/CBC).
         Bascule automatiquement sur le greedy si PuLP n'est pas disponible.
+
+        Paramètres :
+            gare_arrivee_id : code UIC 8 chiffres de la gare d'arrivée cible.
+                              None = pas de contrainte de fin (comportement v1).
+                              Si fourni et aucune solution possible → ValueError.
         """
         try:
             import pulp  # noqa: F401
         except ImportError:
-            logger.warning(
-                "[OrienteeringOptimizer] PuLP non installé — fallback greedy."
-            )
+            logger.warning("[OrienteeringOptimizer] PuLP non installé — fallback greedy.")
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
             )
         return self._solve_milp(
-            graph, gare_depart_id, heure_depart_min, duree_max_minutes
+            graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
         )
 
     # ── Orchestration MILP ────────────────────────────────────────────────────
@@ -97,41 +93,74 @@ class OrienteeringOptimizer(BaseOptimizer):
         gare_depart_id: str,
         heure_depart_min: int,
         duree_max_minutes: int,
+        gare_arrivee_id: Optional[str],
     ) -> dict:
-        """
-        Orchestre les 5 étapes de la résolution MILP.
-        Chaque étape est déléguée à une méthode dédiée (principe S).
-        """
         import pulp
 
         noeud_depart, arcs_accessibles = self._build_subgraph(
             graph, gare_depart_id, heure_depart_min, duree_max_minutes
         )
 
+        # Validation des nœuds sink si contrainte de retour
+        sink_nodes: set[Node] = set()
+        if gare_arrivee_id is not None:
+            sink_nodes = self._find_sink_nodes(arcs_accessibles, gare_arrivee_id)
+
+            # IMPORTANT : le nœud de départ ne peut jamais être un nœud final —
+            # l'agent part de là, il n'y revient qu'à un instant ULTÉRIEUR.
+            # Dans le graphe temps-étendu, le retour à la même gare est représenté
+            # par un nœud distinct (même stop_id, heure différente). Inclure
+            # noeud_depart dans sink_nodes crée une contradiction MILP :
+            #   source_unique: x[arc_départ] = 1
+            #   sink: x[arc_retour] - x[arc_départ] = 1  → x[arc_retour] = 2 (impossible)
+            sink_nodes = sink_nodes - {noeud_depart}
+
+            if not sink_nodes:
+                raise ValueError(
+                    f"[OrienteeringOptimizer] Aucun train n'arrive à {gare_arrivee_id} "
+                    f"dans le budget de {duree_max_minutes} min depuis {gare_depart_id}. "
+                    f"Essayez d'élargir la fenêtre PS/FS ou de changer la gare d'arrivée."
+                )
+
         model, x, arc_ids = self._build_model(arcs_accessibles)
         idx_sortants, idx_entrants = self._build_flow_index(arcs_accessibles)
 
         self._add_objective(model, x, arc_ids, arcs_accessibles)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
-        self._add_flow_constraints(model, x, idx_sortants, idx_entrants, noeud_depart)
+        self._add_flow_constraints(
+            model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
+        )
         self._add_source_constraint(model, x, idx_sortants, noeud_depart)
+        if sink_nodes:
+            self._add_sink_constraint(model, x, idx_sortants, idx_entrants, sink_nodes)
 
         status = self._run_cbc(model, pulp)
 
         if not self._is_feasible(status, pulp):
+            if gare_arrivee_id is not None:
+                raise ValueError(
+                    f"[OrienteeringOptimizer] Impossible de construire une tournée "
+                    f"qui revient à {gare_arrivee_id} dans {duree_max_minutes} min. "
+                    f"Modifiez les paramètres (heure PS/FS ou gare d'arrivée)."
+                )
             logger.warning(
                 "[OrienteeringOptimizer] CBC infaisable (status=%s) — fallback greedy.",
                 pulp.LpStatus[status],
             )
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
             )
 
         arcs_actifs = self._extract_active_arcs(x, arc_ids, arcs_accessibles, pulp)
         if not arcs_actifs:
+            if gare_arrivee_id is not None:
+                raise ValueError(
+                    f"[OrienteeringOptimizer] Solution CBC vide avec contrainte de retour "
+                    f"sur {gare_arrivee_id}. Vérifiez les paramètres."
+                )
             logger.warning("[OrienteeringOptimizer] Solution CBC vide — fallback greedy.")
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
             )
 
         return self._build_result(arcs_actifs, noeud_depart)
@@ -145,10 +174,6 @@ class OrienteeringOptimizer(BaseOptimizer):
         heure_depart_min: int,
         duree_max_minutes: int,
     ) -> tuple[Node, list[Arc]]:
-        """
-        Identifie le nœud de départ et filtre le sous-graphe accessible.
-        Lève ValueError si aucun arc exploitable n'est trouvé.
-        """
         noeud_depart = self._find_depart_node(graph, gare_depart_id, heure_depart_min)
         if noeud_depart is None:
             raise ValueError(
@@ -157,9 +182,7 @@ class OrienteeringOptimizer(BaseOptimizer):
                 f"{heure_depart_min // 60:02d}h{heure_depart_min % 60:02d}."
             )
 
-        arcs_accessibles = self._filter_reachable_arcs(
-            graph, noeud_depart, duree_max_minutes
-        )
+        arcs_accessibles = self._filter_reachable_arcs(graph, noeud_depart, duree_max_minutes)
         if not arcs_accessibles:
             raise ValueError(
                 f"[OrienteeringOptimizer] Aucun arc accessible depuis "
@@ -180,13 +203,37 @@ class OrienteeringOptimizer(BaseOptimizer):
         )
         return noeud_depart, arcs_accessibles
 
+    # ── Étape 1b : identification des nœuds sink ──────────────────────────────
+
+    def _find_sink_nodes(
+        self,
+        arcs_accessibles: list[Arc],
+        gare_arrivee_id: str,
+    ) -> set[Node]:
+        """
+        Retourne l'ensemble des nœuds du sous-graphe dont stop_id == gare_arrivee_id.
+
+        Un arc arrive à un sink si son destination.stop_id == gare_arrivee_id.
+        Ces nœuds représentent "être à la gare d'arrivée à un instant quelconque".
+
+        Si ce set est vide, la contrainte de retour est physiquement impossible.
+        """
+        sink_nodes: set[Node] = set()
+        for arc in arcs_accessibles:
+            if arc.destination.stop_id == gare_arrivee_id:
+                sink_nodes.add(arc.destination)
+            # Un arc de correspondance à la gare arrivée est aussi un nœud sink
+            if arc.source.stop_id == gare_arrivee_id:
+                sink_nodes.add(arc.source)
+        logger.info(
+            "[OrienteeringOptimizer] Sink nodes pour %s : %d nœuds identifiés.",
+            gare_arrivee_id, len(sink_nodes),
+        )
+        return sink_nodes
+
     # ── Étape 2 : construction du modèle PuLP ─────────────────────────────────
 
     def _build_model(self, arcs_accessibles: list[Arc]):
-        """
-        Crée le modèle PuLP et les variables binaires x[i].
-        Retourne (model, x, arc_ids).
-        """
         import pulp
         model   = pulp.LpProblem("orienteering_laf", pulp.LpMaximize)
         arc_ids = list(range(len(arcs_accessibles)))
@@ -199,10 +246,6 @@ class OrienteeringOptimizer(BaseOptimizer):
         self,
         arcs_accessibles: list[Arc],
     ) -> tuple[dict[Node, list[int]], dict[Node, list[int]]]:
-        """
-        Construit les index node → indices des arcs sortants/entrants.
-        Utilisé par les contraintes de flux C2 et C3.
-        """
         idx_sortants: dict[Node, list[int]] = {}
         idx_entrants: dict[Node, list[int]] = {}
         for i, arc in enumerate(arcs_accessibles):
@@ -213,9 +256,6 @@ class OrienteeringOptimizer(BaseOptimizer):
     # ── Étape 4a : objectif ───────────────────────────────────────────────────
 
     def _add_objective(self, model, x, arc_ids, arcs_accessibles):
-        """
-        Objectif : maximiser la somme des fraud_score sur les arcs TRAIN.
-        """
         import pulp
         model += pulp.lpSum(
             arcs_accessibles[i].fraud_score * x[i]
@@ -225,12 +265,7 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     # ── Étape 4b : contrainte budget ──────────────────────────────────────────
 
-    def _add_budget_constraint(
-        self, model, x, arc_ids, arcs_accessibles, duree_max_minutes: int
-    ):
-        """
-        C1 — Budget temps : Σ duration × x[i] ≤ duree_max_minutes.
-        """
+    def _add_budget_constraint(self, model, x, arc_ids, arcs_accessibles, duree_max_minutes):
         import pulp
         model += (
             pulp.lpSum(arcs_accessibles[i].duration_min * x[i] for i in arc_ids)
@@ -246,16 +281,25 @@ class OrienteeringOptimizer(BaseOptimizer):
         idx_sortants: dict[Node, list[int]],
         idx_entrants: dict[Node, list[int]],
         noeud_depart: Node,
+        sink_nodes: set[Node],
     ):
         """
-        C2 — Continuité de flux à chaque nœud intermédiaire (≠ départ) :
-             Σ x[entrants vers n] = Σ x[sortants de n]
+        C2a — Conservation du flux à chaque nœud intermédiaire.
+
+        Nœuds exclus de la conservation standard :
+            - noeud_depart : géré par la contrainte source C3
+            - sink_nodes   : gérés par la contrainte sink C2b (si définis)
+
+        Si un nœud est à la fois dans sink_nodes et est une escale intermédiaire,
+        la contrainte sink agrégée (C2b) force quand même la terminaison.
         """
         import pulp
         tous_noeuds = set(idx_sortants.keys()) | set(idx_entrants.keys())
         for node in tous_noeuds:
             if node == noeud_depart:
                 continue
+            if node in sink_nodes:
+                continue  # géré par _add_sink_constraint
             entrants = pulp.lpSum(x[i] for i in idx_entrants.get(node, []))
             sortants = pulp.lpSum(x[i] for i in idx_sortants.get(node, []))
             model += (entrants == sortants), f"flux_{hash(node) % 10**9}"
@@ -269,9 +313,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         idx_sortants: dict[Node, list[int]],
         noeud_depart: Node,
     ):
-        """
-        C3 — Source unique : exactement un arc sortant du nœud de départ.
-        """
+        """C3 — Source unique : exactement un arc sortant du nœud de départ."""
         import pulp
         sortants_depart = idx_sortants.get(noeud_depart, [])
         if not sortants_depart:
@@ -283,10 +325,54 @@ class OrienteeringOptimizer(BaseOptimizer):
             pulp.lpSum(x[i] for i in sortants_depart) == 1
         ), "source_unique"
 
+    # ── Étape 4e : contrainte sink (retour gare) ──────────────────────────────
+
+    def _add_sink_constraint(
+        self,
+        model,
+        x,
+        idx_sortants: dict[Node, list[int]],
+        idx_entrants: dict[Node, list[int]],
+        sink_nodes: set[Node],
+    ):
+        """
+        C2b — Contrainte de retour à la gare d'arrivée.
+
+        Formulation : le flux net agrégé aux nœuds sink doit être +1.
+            Σ x[entrants vers n ∈ Sink] − Σ x[sortants de n ∈ Sink] == 1
+
+        Signification : exactement 1 unité de flux se "consomme" à la gare
+        d'arrivée, i.e., le chemin se termine obligatoirement dans cette gare.
+
+        La contrainte est sur l'AGRÉGAT de tous les nœuds sink (pas un nœud
+        spécifique) car dans le graphe temps-étendu, la gare d'arrivée peut
+        être atteinte à plusieurs heures différentes.
+        """
+        import pulp
+        entrants_sink = [
+            i
+            for n in sink_nodes
+            for i in idx_entrants.get(n, [])
+        ]
+        sortants_sink = [
+            i
+            for n in sink_nodes
+            for i in idx_sortants.get(n, [])
+        ]
+        if not entrants_sink:
+            raise ValueError(
+                "[OrienteeringOptimizer] Aucun arc entrant dans les nœuds sink — "
+                "la contrainte de retour est physiquement impossible."
+            )
+        model += (
+            pulp.lpSum(x[i] for i in entrants_sink)
+            - pulp.lpSum(x[i] for i in sortants_sink)
+            == 1
+        ), "retour_gare_arrivee"
+
     # ── Étape 5 : résolution CBC ──────────────────────────────────────────────
 
     def _run_cbc(self, model, pulp) -> int:
-        """Lance CBC et retourne le statut de résolution."""
         solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=self.time_limit_seconds)
         status = model.solve(solver)
         logger.info(
@@ -297,7 +383,6 @@ class OrienteeringOptimizer(BaseOptimizer):
         return status
 
     def _is_feasible(self, status: int, pulp) -> bool:
-        """Retourne True si CBC a trouvé une solution entière faisable."""
         return status in (
             pulp.constants.LpSolutionOptimal,
             pulp.constants.LpSolutionIntegerFeasible,
@@ -305,10 +390,7 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     # ── Étape 6 : extraction et reconstruction ────────────────────────────────
 
-    def _extract_active_arcs(
-        self, x, arc_ids, arcs_accessibles, pulp
-    ) -> list[Arc]:
-        """Extrait les arcs dont la variable x[i] = 1 dans la solution CBC."""
+    def _extract_active_arcs(self, x, arc_ids, arcs_accessibles, pulp) -> list[Arc]:
         return [
             arcs_accessibles[i]
             for i in arc_ids
@@ -316,13 +398,10 @@ class OrienteeringOptimizer(BaseOptimizer):
         ]
 
     def _build_result(self, arcs_actifs: list[Arc], noeud_depart: Node) -> dict:
-        """Reconstruit le chemin ordonné et calcule les métriques de la tournée."""
         arcs_ordonnes = _reconstruct_path(arcs_actifs, noeud_depart)
-        score_total   = sum(
-            a.fraud_score for a in arcs_ordonnes if a.arc_type == ArcType.TRAIN
-        )
-        duree_totale = sum(a.duration_min for a in arcs_ordonnes)
-        nb_trains    = sum(1 for a in arcs_ordonnes if a.arc_type == ArcType.TRAIN)
+        score_total   = sum(a.fraud_score for a in arcs_ordonnes if a.arc_type == ArcType.TRAIN)
+        duree_totale  = sum(a.duration_min for a in arcs_ordonnes)
+        nb_trains     = sum(1 for a in arcs_ordonnes if a.arc_type == ArcType.TRAIN)
 
         logger.info(
             "[OrienteeringOptimizer] ✅ MILP : %d trains | score=%.4f | durée=%dmin",
@@ -362,11 +441,22 @@ class OrienteeringOptimizer(BaseOptimizer):
         """
         BFS temporel depuis noeud_depart dans le budget duree_max_minutes.
 
-        Filtres sur les arcs TRAIN :
-            - duration_min < MIN_BOARD_DURATION_MINUTES → contrôle impossible
-            - 0 < fraud_score < MIN_FRAUD_SCORE_THRESHOLD → train sans intérêt LAF
-              Les arcs à 0.0 (non scorés) sont conservés pour la connectivité ;
-              CBC les ignorera via l'objectif.
+        IMPORTANT — pourquoi le filtre MIN_FRAUD_SCORE_THRESHOLD est absent ici :
+
+        Le BFS doit garantir la connectivité COMPLETE du graphe, y compris
+        les trains a faible score qui peuvent etre les seuls chemins disponibles
+        pour revenir a la gare d'arrivee (contrainte aller_retour).
+
+        Exemple : si le seul train de retour a score=0.04, le filtrer ici coupe
+        definitivement ce chemin — sink_nodes reste vide et le solver leve
+        ValueError au lieu de trouver la solution.
+
+        Le MILP gere naturellement la selection par score :
+            - arc score=0.04  → contribue 0.04 a l'objectif, choisi si necessaire
+            - arc score=0.80  → contribue 0.80, prioritaire
+
+        Seul filtre physique maintenu : MIN_BOARD_DURATION_MINUTES.
+        Un troncon < 6 min est physiquement non controlable, independamment du score.
         """
         heure_limite = noeud_depart.time_minutes + duree_max_minutes
         visites:     set[Node]  = set()
@@ -382,8 +472,10 @@ class OrienteeringOptimizer(BaseOptimizer):
             for arc in graph.get(noeud, []):
                 if arc.destination.time_minutes > heure_limite:
                     continue
-                if arc.arc_type == ArcType.TRAIN and not self._is_arc_eligible(arc):
+                # Seul filtre physique : duree minimum pour qu'un controle soit possible
+                if arc.arc_type == ArcType.TRAIN and arc.duration_min < MIN_BOARD_DURATION_MINUTES:
                     continue
+                # Pas de filtre score ici — le MILP gere la selection par valeur
                 arcs_result.append(arc)
                 if arc.destination not in visites:
                     a_explorer.append(arc.destination)
@@ -392,9 +484,10 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     def _is_arc_eligible(self, arc: Arc) -> bool:
         """
-        Retourne True si un arc TRAIN est éligible au graphe MILP.
-        Responsabilité unique : encapsuler les critères de filtrage.
-        """
+           MÉTHODE NON UTILISÉE DANS LE BFS (voir _filter_reachable_arcs).
+           Conservée uniquement pour usage manuel de debug/analyse offline.
+           Ne pas appeler depuis le pipeline de production.
+           """
         if arc.duration_min < MIN_BOARD_DURATION_MINUTES:
             return False
         if 0.0 < arc.fraud_score < MIN_FRAUD_SCORE_THRESHOLD:
@@ -409,11 +502,22 @@ class OrienteeringOptimizer(BaseOptimizer):
         gare_depart_id: str,
         heure_depart_min: int,
         duree_max_minutes: int,
+        gare_arrivee_id: Optional[str] = None,
     ) -> dict:
         """
-        Greedy de secours — activé si PuLP absent ou CBC infaisable.
-        Garantit qu'OrienteeringOptimizer retourne toujours une réponse.
+        Greedy de secours — activé si PuLP absent ou CBC infaisable (sans contrainte retour).
+
+        Note : le greedy ne gère pas la contrainte gare_arrivee_id. Si cette contrainte
+        est requise et le MILP a échoué, on lève ValueError plutôt que de retourner
+        une tournée incorrecte.
         """
+        if gare_arrivee_id is not None:
+            raise ValueError(
+                f"[OrienteeringOptimizer] Impossible de garantir le retour à "
+                f"{gare_arrivee_id} : MILP infaisable et le greedy ne gère pas "
+                f"les contraintes de retour. Modifiez la fenêtre PS/FS."
+            )
+
         noeud_depart = self._find_depart_node(graph, gare_depart_id, heure_depart_min)
         if noeud_depart is None:
             raise ValueError(
@@ -441,12 +545,10 @@ class OrienteeringOptimizer(BaseOptimizer):
 
 
 # ── Fonctions utilitaires module-level ────────────────────────────────────────
-# Module-level pour être testables indépendamment de la classe (principe S).
 
 def _reconstruct_path(arcs_actifs: list[Arc], noeud_depart: Node) -> list[Arc]:
     """
     Reconstruit la séquence ordonnée d'arcs depuis le set des arcs actifs CBC.
-
     CBC retourne un ensemble non ordonné — on réordonne en chaîne
     en suivant source → destination depuis noeud_depart.
     """
@@ -471,12 +573,8 @@ def _greedy_walk(
 ) -> tuple[list[Arc], float, int]:
     """
     Parcours greedy depuis noeud_depart.
-
     À chaque étape : prend le meilleur arc TRAIN disponible dans le budget,
     sinon la correspondance la plus courte, sinon s'arrête.
-
-    Retourne (arcs_tournee, score_total, temps_ecoule).
-    Séparé de _greedy_fallback pour être testable indépendamment.
     """
     noeud_courant = noeud_depart
     temps_ecoule  = 0
@@ -507,12 +605,7 @@ def _greedy_walk(
     return arcs_tournee, score_total, temps_ecoule
 
 
-def _best_train_arc(
-    arcs: list[Arc],
-    temps_ecoule: int,
-    duree_max: int,
-) -> Optional[Arc]:
-    """Retourne l'arc TRAIN avec le meilleur score dans le budget restant."""
+def _best_train_arc(arcs: list[Arc], temps_ecoule: int, duree_max: int) -> Optional[Arc]:
     candidats = [
         a for a in arcs
         if a.arc_type == ArcType.TRAIN
@@ -521,12 +614,7 @@ def _best_train_arc(
     return max(candidats, key=lambda a: a.fraud_score) if candidats else None
 
 
-def _shortest_correspondance(
-    arcs: list[Arc],
-    temps_ecoule: int,
-    duree_max: int,
-) -> Optional[Arc]:
-    """Retourne la correspondance la plus courte dans le budget restant."""
+def _shortest_correspondance(arcs: list[Arc], temps_ecoule: int, duree_max: int) -> Optional[Arc]:
     candidats = [
         a for a in arcs
         if a.arc_type == ArcType.CORRESPONDANCE
