@@ -1,4 +1,6 @@
 from fastapi import APIRouter
+from shared.config import config
+
 
 from shared.schemas import HealthSchema
 
@@ -16,4 +18,4 @@ def health() -> HealthSchema:
     Utilisé par Docker et les outils de monitoring pour vérifier
     que le service est opérationnel.
     """
-    return HealthSchema(status="ok", version="0.1.0")
+    return HealthSchema(status="ok", version=config.API_VERSION)
