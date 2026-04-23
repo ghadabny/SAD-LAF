@@ -89,22 +89,23 @@ class GTFSPreprocessor:
 
         return time_series.apply(_to_minutes)
 
-    def filter_ter(
-        self,
-        trips: pd.DataFrame,
-        routes: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Filtre les trips pour ne conserver que les TER (route_type=2).
-        """
+    def filter_ter(self, trips: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
+        # Filtre 1 : route_type=2 (nécessaire mais pas suffisant)
         ter_route_ids = routes[
             routes["route_type"] == self.TER_ROUTE_TYPE
-        ]["route_id"]
-
+            ]["route_id"]
         filtered = trips[trips["route_id"].isin(ter_route_ids)].copy()
+
+        # Filtre 2 : whiteliste :TER:FR: uniquement dans le trip_id
+        # Élimine OUI (TGV), OGO (Ouigo), LYR (Lyria), ICE, CTE (cars), TRN...
+        # Robuste : tout nouveau service SNCF sans :TER:FR: sera automatiquement exclu
+        filtered = filtered[
+            filtered["trip_id"].str.contains(":TER:FR:", na=False)
+        ]
+
         print(
             f"[GTFSPreprocessor] Filtre TER : "
-            f"{len(filtered):,} trips conservés sur {len(trips):,} total."
+            f"{len(filtered):,} trips TER:FR conservés sur {len(trips):,} total."
         )
         return filtered
 
