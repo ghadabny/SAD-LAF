@@ -224,6 +224,7 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         # format_with_id reçoit l'objet ET l'ID déjà fixé → pas de double UUID
         df        = formatter.format_with_id(response_obj, tournee_id)
         csv_path  = exporter.export_from_df(df, response_obj, tournee_id)
+        exporter.export_json_flat(df, response_obj, tournee_id)
 
         # Mise à jour de csv_path sur l'objet unique
         try:
