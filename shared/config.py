@@ -51,16 +51,40 @@ class AppConfig:
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
 
     # Chemins des données
-    DATA_DIR: Path = Path(os.getenv("DATA_DIR", "data"))
-    GTFS_DIR: Path = Path(os.getenv("GTFS_DIR", "data/raw/gtfs"))
-    GTFS_RT_DIR: Path = Path(os.getenv("GTFS_RT_DIR", "data/raw/gtfs_rt"))
-    LAF_DIR: Path = Path(os.getenv("LAF_DIR", "data/raw/laf"))
-    MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", "data/models"))
-    OUTPUTS_DIR: Path = Path(os.getenv("OUTPUTS_DIR", "data/outputs"))
-    PROCESSED_DIR: Path = Path(os.getenv("PROCESSED_DIR", "data/processed"))
+    DATA_DIR:       Path = Path(os.getenv("DATA_DIR",       "data"))
+    GTFS_DIR:       Path = Path(os.getenv("GTFS_DIR",       "data/raw/gtfs"))
+    GTFS_RT_DIR:    Path = Path(os.getenv("GTFS_RT_DIR",    "data/raw/gtfs_rt"))
+    LAF_DIR:        Path = Path(os.getenv("LAF_DIR",        "data/raw/laf"))
+    MODELS_DIR:     Path = Path(os.getenv("MODELS_DIR",     "data/models"))
+    OUTPUTS_DIR:    Path = Path(os.getenv("OUTPUTS_DIR",    "data/outputs"))
+    PROCESSED_DIR:  Path = Path(os.getenv("PROCESSED_DIR",  "data/processed"))
     HYPERPARAMS_PATH: Path = Path('services/ml_engine/config/hyperparameters.yml')
     PREDICT_API_URL: str = os.getenv("PREDICT_API_URL", "http://api:8000/predict/batch")
     API_VERSION: str = "0.2.0"
+
+    # ── Listener event-driven ─────────────────────────────────────────────────
+    # Dossiers surveillés par FileListener (synchronisés via OneDrive).
+    #
+    # Structure attendue :
+    #   data/requests/
+    #       ├── processed/   ← fichiers traités avec succès
+    #       └── errors/      ← fichiers en erreur + rapport .error.json
+    #   data/decisions/
+    #       ├── processed/
+    #       └── errors/
+    #
+    # Ces dossiers sont exclus du .gitignore (données opérationnelles).
+    # Les sous-dossiers processed/ et errors/ sont versionnés via .gitkeep.
+    REQUESTS_DIR:  Path = Path(os.getenv("REQUESTS_DIR",  "data/requests"))
+    DECISIONS_DIR: Path = Path(os.getenv("DECISIONS_DIR", "data/decisions"))
+
+    # Intervalles de polling du listener (en secondes)
+    REQUEST_LISTENER_INTERVAL_SECONDS:  int = int(
+        os.getenv("REQUEST_LISTENER_INTERVAL_SECONDS", "30")
+    )
+    DECISION_LISTENER_INTERVAL_SECONDS: int = int(
+        os.getenv("DECISION_LISTENER_INTERVAL_SECONDS", "15")
+    )
 
     @property
     def lgbm_params(self) -> dict:
