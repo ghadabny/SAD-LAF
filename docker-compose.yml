@@ -7,6 +7,7 @@
 # GTFS Static    → téléchargé automatiquement par le scheduler tous les jours à 03:00
 # GTFS-RT        → mis à jour automatiquement par le scheduler toutes les 2 minutes
 # Export CSV     → déclenché automatiquement à chaque POST /optimize
+# Listener       → intégré dans l'API, surveille data/requests/ et data/decisions/
 #
 # MANUEL — uniquement lors d'une nouvelle livraison LAF :
 #   docker-compose run --rm ml_engine
@@ -38,12 +39,13 @@ x-env-data: &env-data
 services:
 
   # ══════════════════════════════════════════════════════════════
-  # SERVICE CONTINU 1 — API FastAPI
+  # SERVICE CONTINU 1 — API FastAPI + Listener event-driven
   #
   # Responsabilités :
   #   - Scoring ML (GET /predict)
   #   - Génération de tournées (POST /optimize)
   #   - Export CSV automatique après chaque /optimize
+  #   - Listener : surveille data/requests/ et data/decisions/   ← AJOUT
   # ══════════════════════════════════════════════════════════════
   api:
     build:
@@ -59,6 +61,13 @@ services:
     environment:
       <<: *env-data
       PREDICT_API_URL: "http://api:8000/predict/batch"
+      # ── Listener event-driven ────────────────────────────────
+      # Ces chemins correspondent au volume monté /app/data.
+      # Sur la ThinkStation, data/ est synchronisé avec OneDrive.
+      REQUESTS_DIR: /app/data/requests
+      DECISIONS_DIR: /app/data/decisions
+      REQUEST_LISTENER_INTERVAL_SECONDS: 30
+      DECISION_LISTENER_INTERVAL_SECONDS: 15
     networks:
       - sad_laf_net
     healthcheck:
