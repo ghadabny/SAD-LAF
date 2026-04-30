@@ -127,6 +127,35 @@ class TourneeExporter:
         logger.info("[TourneeExporter] JSON archivé : %s", path.name)
         return path
 
+    def export_json_flat(
+            self,
+            df: pd.DataFrame,
+            response: "OptimizeResponseV2Schema",
+            tournee_id: str,
+    ) -> Path:
+        """
+        Export JSON plat pour Power Automate.
+        Produit un tableau JSON — une entrée par ligne du CSV (un arc TRAIN).
+        Nommage : pa_{agent_id}_{YYYYMMDD}_{HHmmss}.json
+        """
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        agent_id = (response.request.agent_id or "INCONNU").replace(" ", "_")
+        date_str = response.tournee.service_date.strftime("%Y%m%d")
+        time_str = response.optimized_at.strftime("%H%M%S")
+        filename = f"pa_{agent_id}_{date_str}_{time_str}.json"
+        json_dir = self._output_dir /"json_outputs"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        path = json_dir / filename
+
+        records = df.to_dict(orient="records")
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2, default=str)
+
+        logger.info("[TourneeExporter] JSON Power Automate écrit : %s", path.name)
+        return path
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _build_filename_from_response(
