@@ -189,7 +189,7 @@ class TestProcessPendingRequests:
 
     def test_process_request_valid(self, listener, dossiers_tmp):
         """
-        Fichier valide → _generer_tournee() appelé → fichier déplacé vers processed/.
+        Fichier valide → generer() appelé → fichier déplacé vers processed/.
         """
         chemin = _ecrire_json(
             dossiers_tmp["requests"],
@@ -197,8 +197,9 @@ class TestProcessPendingRequests:
             REQUETE_VALIDE,
         )
 
-        with patch.object(listener, "_generer_tournee") as mock_gen:
-            mock_gen.return_value = None
+        # 🔧 FIX: Mock 'generer' on the injected TourneeGenerationService
+        with patch.object(listener._generation_service, "generer") as mock_gen:
+            mock_gen.return_value = "TRN_MOCK"  # Return a mock ID
             listener.process_pending_requests()
 
         # Le fichier source a disparu de requests/
@@ -253,6 +254,7 @@ class TestProcessPendingRequests:
 
         def mock_generer(request):
             fichiers_traites.append(request.agent_id)
+            return f"TRN_{request.agent_id}"
 
         _ecrire_json(dossiers_tmp["requests"], "req_001.json", {
             **REQUETE_VALIDE, "agent_id": "AGENT_001",
@@ -261,7 +263,8 @@ class TestProcessPendingRequests:
             **REQUETE_VALIDE, "agent_id": "AGENT_002",
         })
 
-        with patch.object(listener, "_generer_tournee", side_effect=mock_generer):
+        # 🔧 FIX: Mock 'generer' on the injected TourneeGenerationService
+        with patch.object(listener._generation_service, "generer", side_effect=mock_generer):
             listener.process_pending_requests()
 
         # Chaque agent traité exactement une fois
