@@ -63,19 +63,25 @@ WORKDIR /app
 
 # Code source — uniquement ce dont l'API a besoin :
 #   services/api/       → routers FastAPI (health, predict, optimize)
+#   services/listener/  → FileListener + TourneeGenerationService (listener event-driven)  ← AJOUT
 #   services/ml_engine/ → GTFSLoader, GTFSPreprocessor, LGBMScorer, FeaturePipeline
 #   services/or_engine/ → TimeExpandedGraphBuilder, OrienteeringOptimizer, solver
+#   services/exporter/  → TourneeExporter, TourneeFormatter
 #   shared/             → config, constants, schemas Pydantic
 COPY --chown=sadlaf:sadlaf services/api/        ./services/api/
+COPY --chown=sadlaf:sadlaf services/listener/   ./services/listener/
 COPY --chown=sadlaf:sadlaf services/ml_engine/  ./services/ml_engine/
 COPY --chown=sadlaf:sadlaf services/or_engine/  ./services/or_engine/
 COPY --chown=sadlaf:sadlaf services/exporter/   ./services/exporter/
 COPY --chown=sadlaf:sadlaf shared/              ./shared/
 COPY --chown=sadlaf:sadlaf config/              ./config/
 
-# Dossier de données monté via docker-compose (volume externe)
+# Dossiers de données montés via docker-compose (volume externe)
+# Les dossiers requests/ et decisions/ sont synchronisés depuis OneDrive via le volume.
 RUN mkdir -p /app/data/raw/gtfs /app/data/raw/laf \
-             /app/data/models /app/data/outputs /app/data/processed
+             /app/data/models /app/data/outputs /app/data/processed \
+             /app/data/requests/processed /app/data/requests/errors \
+             /app/data/decisions/processed /app/data/decisions/errors
 
 ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
