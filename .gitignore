@@ -29,6 +29,10 @@ auth_tokens/
 *.key
 
 # === Données SNCF (sensibles + volumineuses) ===
+# data/raw/      → GTFS Static téléchargé au runtime par le scheduler
+# data/processed/ → cache Parquet GTFS-RT, généré au runtime
+# data/models/   → artefacts LightGBM, régénérés par ml_engine
+# data/outputs/  → CSV/JSON tournées, générés au runtime par l'API
 data/raw/
 data/processed/
 data/models/
@@ -50,9 +54,8 @@ logs/
 .pytest_cache/
 htmlcov/
 .coverage
-```
 
-# ===Doc Explicative pour moi ===
+# === Doc explicative ===
 doc/
 
 # === Cache GTFS-RT (généré automatiquement au runtime) ===
@@ -61,3 +64,17 @@ data/cache/
 
 # === Fichiers de test API ===
 apitest.py
+
+# === Listener event-driven — dossiers de traitement ─────────────────────────
+# Les dossiers sont exclus car ils contiennent des données opérationnelles
+# (fichiers JSON Power Automate, parfois sensibles).
+# Les .gitkeep versionnent la structure de dossiers vide pour que le
+# FileListener trouve ses dossiers au démarrage, même sans OneDrive synchronisé.
+data/requests/*
+data/decisions/*
+!data/requests/.gitkeep
+!data/decisions/.gitkeep
+!data/requests/processed/.gitkeep
+!data/requests/errors/.gitkeep
+!data/decisions/processed/.gitkeep
+!data/decisions/errors/.gitkeep
