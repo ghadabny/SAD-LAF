@@ -146,6 +146,11 @@ apitest.py
 # FileListener trouve ses dossiers au démarrage, même sans OneDrive synchronisé.
 data/requests/*
 data/decisions/*
+data/raw/*
+data/processed/*
+data/models/*
+data/outputs/*
+data/cache/*
 
 # === EXCEPTIONS POUR GARDER LA STRUCTURE (Indispensable pour Docker) ===
 # On autorise Git à suivre les fichiers .gitkeep même dans les dossiers ignorés
