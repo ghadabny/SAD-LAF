@@ -9,7 +9,7 @@ build/
 dist/
 *.spec
 
-# === Packaging Python (généré automatiquement par pip install -e .) ===
+# === Packaging Python ===
 *.egg-info/
 *.egg
 .eggs/
@@ -28,135 +28,44 @@ auth_tokens/
 *.pem
 *.key
 
-# === Données SNCF (sensibles + volumineuses) ===
-# data/raw/      → GTFS Static téléchargé au runtime par le scheduler
-# data/processed/ → cache Parquet GTFS-RT, généré au runtime
-# data/models/   → artefacts LightGBM, régénérés par ml_engine
-# data/outputs/  → CSV/JSON tournées, générés au runtime par l'API
-data/raw/
-data/processed/
-data/models/
-data/outputs/
-*.csv
-*.xlsx
-*.json
-!patterns_config.json
-
-# === Modèles ML ===
-models/*.pkl
-models/*.joblib
-models/*.bst
-models/*.h5
-
-# === Logs et CI ===
-logs/
-*.log
-.pytest_cache/
-htmlcov/
-.coverage
-
-# === Doc explicative ===
-doc/
-
-# === Cache GTFS-RT (généré automatiquement au runtime) ===
-data/cache/
-*.parquet
-
-# === Fichiers de test API ===
-apitest.py
-
-# === Listener event-driven — dossiers de traitement ─────────────────────────
-# Les dossiers sont exclus car ils contiennent des données opérationnelles
-# (fichiers JSON Power Automate, parfois sensibles).
-# Les .gitkeep versionnent la structure de dossiers vide pour que le
-# FileListener trouve ses dossiers au démarrage, même sans OneDrive synchronisé.
-data/requests/*
-data/decisions/*
-# === Environnement Python ===
-__pycache__/
-*.py[cod]
-*$py.class
-venv/
-env/
-.venv/
-build/
-dist/
-*.spec
-
-# === Packaging Python (généré automatiquement par pip install -e .) ===
-*.egg-info/
-*.egg
-.eggs/
-
-# === Outils de développement ===
-.idea/
-*.iws
-out/
-repomix-output.xml
-
-# === Configuration et Secrets ===
-config/.env.dev
-secrets.json
-config.yaml
-auth_tokens/
-*.pem
-*.key
-
-# === Données SNCF (sensibles + volumineuses) ===
-# data/raw/      → GTFS Static téléchargé au runtime par le scheduler
-# data/processed/ → cache Parquet GTFS-RT, généré au runtime
-# data/models/   → artefacts LightGBM, régénérés par ml_engine
-# data/outputs/  → CSV/JSON tournées, générés au runtime par l'API
-data/raw/
-data/processed/
-data/models/
-data/outputs/
-*.csv
-*.xlsx
-*.json
-!patterns_config.json
-
-# === Modèles ML ===
-models/*.pkl
-models/*.joblib
-models/*.bst
-models/*.h5
-
-# === Logs et CI ===
-logs/
-*.log
-.pytest_cache/
-htmlcov/
-.coverage
-
-# === Doc explicative ===
-doc/
-
-# === Cache GTFS-RT (généré automatiquement au runtime) ===
-data/cache/
-*.parquet
-
-# === Fichiers de test API ===
-apitest.py
-
-# === Listener event-driven — dossiers de traitement ─────────────────────────
-# Les dossiers sont exclus car ils contiennent des données opérationnelles
-# (fichiers JSON Power Automate, parfois sensibles).
-# Les .gitkeep versionnent la structure de dossiers vide pour que le
-# FileListener trouve ses dossiers au démarrage, même sans OneDrive synchronisé.
-data/requests/*
-data/decisions/*
+# === Données et Modèles (On ignore le CONTENU, on garde la STRUCTURE) ===
+# Note : L'étoile /* est obligatoire pour que Git puisse voir les .gitkeep
 data/raw/*
 data/processed/*
 data/models/*
 data/outputs/*
 data/cache/*
+data/requests/*
+data/decisions/*
+
+# Sécurité : on ignore les fichiers de données par extension
+*.csv
+*.xlsx
+*.json
+*.parquet
+*.joblib
+*.pkl
+*.bst
+*.h5
+*.txt
+!patterns_config.json
+
+# === Logs et CI ===
+logs/
+*.log
+.pytest_cache/
+htmlcov/
+.coverage
+
+# === Doc et Tests ===
+doc/
+apitest.py
 
 # === EXCEPTIONS POUR GARDER LA STRUCTURE (Indispensable pour Docker) ===
-# On autorise Git à suivre les fichiers .gitkeep même dans les dossiers ignorés
+# On autorise Git à suivre les fichiers .gitkeep partout
 !**/.gitkeep
 
-# On s'assure que Git ne rejette pas les dossiers eux-mêmes
+# On autorise les dossiers eux-mêmes pour que Git puisse y entrer
 !data/raw/**/
 !data/processed/**/
 !data/models/**/
