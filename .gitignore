@@ -43,7 +43,7 @@ data/decisions/*
 *.xlsx
 *.json
 *.parquet
-*.joblib
+#*.joblib
 *.pkl
 *.bst
 *.h5
