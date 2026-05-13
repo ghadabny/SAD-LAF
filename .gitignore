@@ -9,7 +9,7 @@ build/
 dist/
 *.spec
 
-# === Packaging Python ===
+# === Packaging Python (généré automatiquement par pip install -e .) ===
 *.egg-info/
 *.egg
 .eggs/
@@ -28,27 +28,25 @@ auth_tokens/
 *.pem
 *.key
 
-# === Données et Modèles (On ignore le CONTENU, on garde la STRUCTURE) ===
-# Note : L'étoile /* est obligatoire pour que Git puisse voir les .gitkeep
-data/raw/*
-data/processed/*
-data/models/*
-data/outputs/*
-data/cache/*
-data/requests/*
-data/decisions/*
-
-# Sécurité : on ignore les fichiers de données par extension
+# === Données SNCF (sensibles + volumineuses) ===
+# data/raw/      → GTFS Static téléchargé au runtime par le scheduler
+# data/processed/ → cache Parquet GTFS-RT, généré au runtime
+# data/models/   → artefacts LightGBM, régénérés par ml_engine
+# data/outputs/  → CSV/JSON tournées, générés au runtime par l'API
+data/raw/
+data/processed/
+data/models/
+data/outputs/
 *.csv
 *.xlsx
 *.json
-*.parquet
-*.joblib
-*.pkl
-*.bst
-*.h5
-*.txt
 !patterns_config.json
+
+# === Modèles ML ===
+models/*.pkl
+models/*.joblib
+models/*.bst
+models/*.h5
 
 # === Logs et CI ===
 logs/
@@ -57,19 +55,26 @@ logs/
 htmlcov/
 .coverage
 
-# === Doc et Tests ===
+# === Doc explicative ===
 doc/
+
+# === Cache GTFS-RT (généré automatiquement au runtime) ===
+data/cache/
+*.parquet
+
+# === Fichiers de test API ===
 apitest.py
 
-# === EXCEPTIONS POUR GARDER LA STRUCTURE (Indispensable pour Docker) ===
-# On autorise Git à suivre les fichiers .gitkeep partout
-!**/.gitkeep
-
-# On autorise les dossiers eux-mêmes pour que Git puisse y entrer
-!data/raw/**/
-!data/processed/**/
-!data/models/**/
-!data/outputs/**/
-!data/cache/**/
-!data/requests/**/
-!data/decisions/**/
+# === Listener event-driven — dossiers de traitement ─────────────────────────
+# Les dossiers sont exclus car ils contiennent des données opérationnelles
+# (fichiers JSON Power Automate, parfois sensibles).
+# Les .gitkeep versionnent la structure de dossiers vide pour que le
+# FileListener trouve ses dossiers au démarrage, même sans OneDrive synchronisé.
+data/requests/*
+data/decisions/*
+!data/requests/.gitkeep
+!data/decisions/.gitkeep
+!data/requests/processed/.gitkeep
+!data/requests/errors/.gitkeep
+!data/decisions/processed/.gitkeep
+!data/decisions/errors/.gitkeep

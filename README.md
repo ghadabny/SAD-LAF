@@ -29,7 +29,7 @@ Le système croise les données historiques de fraude (CC/SC/PV) avec les horair
 
 ## Prérequis
 
-- Docker Desktop
+- Docker Desktop ou Rancher Desktop
 - Python 3.11+ (pour le dev local uniquement)
 - Données LAF (`data/raw/laf/`) — fichiers CC, PV, SC fournis par la DSI
 
