@@ -131,6 +131,7 @@ class OrienteeringOptimizer(BaseOptimizer):
 
         self._add_objective(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
+        self._add_min_duration_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_flow_constraints(
             model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
         )
@@ -286,6 +287,14 @@ class OrienteeringOptimizer(BaseOptimizer):
             pulp.lpSum(arcs_accessibles[i].duration_min * x[i] for i in arc_ids)
             <= duree_max_minutes
         ), "budget_temps"
+
+    def _add_min_duration_constraint(self, model, x, arc_ids, arcs_accessibles, duree_max_minutes):
+        import pulp
+        duree_min = int(duree_max_minutes * 0.80)
+        model += (
+                pulp.lpSum(arcs_accessibles[i].duration_min * x[i] for i in arc_ids)
+                >= duree_min
+        ), "duree_minimale"
 
     # ── Étape 4c : contraintes de flux ────────────────────────────────────────
 
