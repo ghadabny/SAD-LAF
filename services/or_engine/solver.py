@@ -233,7 +233,7 @@ class TourneeOrchestrator:
         self._rt_cache      = rt_cache      or GTFSRTCache()
         self._rt_merger     = rt_merger     or GTFSRTMerger()
         self._graph_builder = graph_builder or TimeExpandedGraphBuilder()
-        self._optimizer     = optimizer     or OrienteeringOptimizer(time_limit_seconds=30)
+        self._optimizer     = optimizer     or OrienteeringOptimizer(time_limit_seconds=120)
 
     # ── Interface publique ────────────────────────────────────────────────────
 

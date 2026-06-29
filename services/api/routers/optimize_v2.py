@@ -157,22 +157,14 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
 
     nb_trains_reels = sum(1 for a in result["arcs"] if a.arc_type == ArcType.TRAIN)
     if nb_trains_reels == 0:
-        # Aller-retour impossible avec trains → fallback sur résultat libre si disponible
-        if score_libre is not None and score_libre > 0 and gare_arrivee is not None:
-            result = _run_solver(request, gare_arrivee_id=None, excluded_trip_ids=excluded_trip_ids)
-            nb_trains_reels = sum(1 for a in result["arcs"] if a.arc_type == ArcType.TRAIN)
-            warning_messages.append(
-                "Aucun itinéraire aller-retour trouvé dans le budget — "
-                "tournée libre retournée (sans contrainte de retour en gare de départ)."
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Aucune tournée aller-retour possible depuis cette gare dans cette fenêtre. "
+                "Élargissez la plage PS/FS ou utilisez le mode 'decouche'."
             )
-        if nb_trains_reels == 0:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Aucune tournée possible depuis cette gare dans cette fenêtre. "
-                    "Essayez le mode 'decouche' ou élargissez la plage PS/FS."
-                )
-            )
+        )
+
     # ── Calcul score_perte_pct ────────────────────────────────────────────────
     score_perte_pct = 0.0
     if score_libre is not None and score_libre > 0:
