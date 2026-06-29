@@ -245,6 +245,7 @@ class TourneeOrchestrator:
         duree_max_minutes: int = 360,
         predict_url:      str = DEFAULT_PREDICT_API_URL,
         gare_arrivee_id:  Optional[str] = None,
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
         """
         Orchestre la génération complète d'une tournée optimisée.
@@ -290,6 +291,7 @@ class TourneeOrchestrator:
             heure_depart_min=heure_depart_min,
             duree_max_minutes=duree_max_minutes,
             gare_arrivee_id=gare_arrivee_id,
+            excluded_trip_ids=excluded_trip_ids,
         )
 
         logger.info(
@@ -393,6 +395,7 @@ def run(
     duree_max_minutes: int = 360,
     predict_url:       str = DEFAULT_PREDICT_API_URL,
     gare_arrivee_id:   Optional[str] = None,
+    excluded_trip_ids: Optional[set] = None,
 ) -> dict:
     """
     Shim de compatibilité — délègue à TourneeOrchestrator().run().
@@ -409,4 +412,5 @@ def run(
         duree_max_minutes=duree_max_minutes,
         predict_url=predict_url,
         gare_arrivee_id=gare_arrivee_id,
+        excluded_trip_ids=excluded_trip_ids,
     )

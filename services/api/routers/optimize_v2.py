@@ -42,6 +42,7 @@ from fastapi import APIRouter, HTTPException
 
 from services.api.booking_store import (
     STATUT_EN_ATTENTE,
+    STATUT_VALIDEE,
     get_booking_store,
 )
 from services.exporter.export import TourneeExporter
@@ -122,14 +123,21 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
 
     warning_messages: list[str] = []
     gare_arrivee = request.gare_arrivee_effective
-    score_libre  = None
+
+    # Anti-doublons : récupère les trips déjà utilisés par d'autres agents ce jour
+    excluded_trip_ids: set | None = None
+    if request.agent_id:
+        booked = get_booking_store().get_all_for_date(request.service_date)
+        excluded_trip_ids = {tid for tid, ag in booked.items() if ag != request.agent_id} or None
+
+    score_libre = None
 
     # ── Résolution de référence (calcul score_perte_pct) ─────────────────────
     # On tourne d'abord SANS contrainte de retour pour obtenir le score maximal
     # théorique. Cela permet de mesurer la "perte" imposée par la contrainte.
     if gare_arrivee is not None:
         try:
-            result_libre = _run_solver(request, gare_arrivee_id=None)
+            result_libre = _run_solver(request, gare_arrivee_id=None, excluded_trip_ids=excluded_trip_ids)
             score_libre  = result_libre["score_total"]
         except (ValueError, FileNotFoundError):
             # Si la résolution libre échoue, on continue sans score de référence.
@@ -138,7 +146,7 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
 
     # ── Résolution avec contrainte de retour ─────────────────────────────────
     try:
-        result = _run_solver(request, gare_arrivee_id=gare_arrivee)
+        result = _run_solver(request, gare_arrivee_id=gare_arrivee, excluded_trip_ids=excluded_trip_ids)
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=f"GTFS non disponibles : {e}")
     except ValueError as e:
@@ -209,7 +217,7 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         tournee=tournee,
         request=request,
         tournee_id=tournee_id,
-        statut=STATUT_EN_ATTENTE,
+        statut=STATUT_VALIDEE,
         score_perte_pct=round(score_perte_pct, 2),
         trains_en_conflit=[],
         csv_path=None,                      # sera mis à jour après l'export
@@ -253,9 +261,10 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
             agent_id=request.agent_id,
             service_date=request.service_date,
             trip_ids=trip_ids,
+            auto_validate=True,
         )
         logger.info(
-            "[optimize_v2] Tournée %s enregistrée EN_ATTENTE pour %s (%d trains).",
+            "[optimize_v2] Tournée %s VALIDEE automatiquement pour %s (%d trains).",
             tournee_id, request.agent_id, len(trip_ids),
         )
 
@@ -479,7 +488,11 @@ def get_tournee(tournee_id: str) -> TourneeRecordSchema:
 # Helpers privés
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_solver(request: TourneeRequestV2Schema, gare_arrivee_id: str | None) -> dict:
+def _run_solver(
+    request: TourneeRequestV2Schema,
+    gare_arrivee_id: str | None,
+    excluded_trip_ids: set | None = None,
+) -> dict:
     """
     Lance le solver OR avec les paramètres de la requête.
 
@@ -492,6 +505,7 @@ def _run_solver(request: TourneeRequestV2Schema, gare_arrivee_id: str | None) ->
         heure_depart_min=request.heure_depart_min,
         duree_max_minutes=request.duree_max_minutes,
         gare_arrivee_id=gare_arrivee_id,
+        excluded_trip_ids=excluded_trip_ids,
     )
 
 

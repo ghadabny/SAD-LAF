@@ -101,24 +101,44 @@ class TripBookingStore:
         agent_id: str,
         service_date: date,
         trip_ids: list[str],
+        auto_validate: bool = True,
     ) -> None:
+        """
+        Enregistre une nouvelle tournée.
+
+        auto_validate=True (défaut) : la tournée est immédiatement VALIDEE
+        et les trains sont réservés. C'est le comportement normal lors d'une
+        génération initiale (décision métier : pas de validation manager requise).
+
+        auto_validate=False : la tournée passe EN_ATTENTE_VALIDATION.
+        Utilisé uniquement pour les demandes de modification d'une tournée
+        existante qui nécessitent une approbation N+1.
+        """
+        statut = STATUT_VALIDEE if auto_validate else STATUT_EN_ATTENTE
+        now    = datetime.now().isoformat()
         record = {
             "tournee_id":   tournee_id,
             "agent_id":     agent_id,
             "service_date": service_date.isoformat(),
             "trip_ids":     trip_ids,
-            "statut":       STATUT_EN_ATTENTE,
-            "created_at":   datetime.now().isoformat(),
-            "validated_by": None,
-            "validated_at": None,
+            "statut":       statut,
+            "created_at":   now,
+            "validated_by": agent_id if auto_validate else None,
+            "validated_at": now       if auto_validate else None,
             "refused_by":   None,
             "refused_at":   None,
         }
         with self._lock:
             self._tournees[tournee_id] = record
+            if auto_validate:
+                day_key   = service_date.isoformat()
+                day_store = self._store.setdefault(day_key, {})
+                for tid in trip_ids:
+                    day_store[tid] = agent_id
             self._persist()
+        label = "✅ validée automatiquement" if auto_validate else "📋 en attente"
         print(
-            f"[BookingStore] 📋 Tournée enregistrée : {tournee_id} "
+            f"[BookingStore] {label} : {tournee_id} "
             f"(agent={agent_id}, {len(trip_ids)} trains)"
         )
 

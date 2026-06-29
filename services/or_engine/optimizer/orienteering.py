@@ -63,7 +63,8 @@ class OrienteeringOptimizer(BaseOptimizer):
         gare_depart_id: str,
         heure_depart_min: int,
         duree_max_minutes: int,
-        gare_arrivee_id: Optional[str] = None,   # ← NOUVEAU v2
+        gare_arrivee_id: Optional[str] = None,
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
         """
         Résout le problème d'Orienteering via MILP (PuLP/CBC).
@@ -79,10 +80,12 @@ class OrienteeringOptimizer(BaseOptimizer):
         except ImportError:
             logger.warning("[OrienteeringOptimizer] PuLP non installé — fallback greedy.")
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
+                excluded_trip_ids=excluded_trip_ids,
             )
         return self._solve_milp(
-            graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
+            graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
+            excluded_trip_ids=excluded_trip_ids,
         )
 
     # ── Orchestration MILP ────────────────────────────────────────────────────
@@ -94,6 +97,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         heure_depart_min: int,
         duree_max_minutes: int,
         gare_arrivee_id: Optional[str],
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
         import pulp
 
@@ -125,7 +129,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         model, x, arc_ids = self._build_model(arcs_accessibles)
         idx_sortants, idx_entrants = self._build_flow_index(arcs_accessibles)
 
-        self._add_objective(model, x, arc_ids, arcs_accessibles)
+        self._add_objective(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_flow_constraints(
             model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
@@ -148,7 +152,8 @@ class OrienteeringOptimizer(BaseOptimizer):
                 pulp.LpStatus[status],
             )
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
+                excluded_trip_ids=excluded_trip_ids,
             )
 
         arcs_actifs = self._extract_active_arcs(x, arc_ids, arcs_accessibles, pulp)
@@ -160,7 +165,8 @@ class OrienteeringOptimizer(BaseOptimizer):
                 )
             logger.warning("[OrienteeringOptimizer] Solution CBC vide — fallback greedy.")
             return self._greedy_fallback(
-                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id
+                graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
+                excluded_trip_ids=excluded_trip_ids,
             )
 
         return self._build_result(arcs_actifs, noeud_depart)
@@ -255,10 +261,18 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     # ── Étape 4a : objectif ───────────────────────────────────────────────────
 
-    def _add_objective(self, model, x, arc_ids, arcs_accessibles):
+    def _add_objective(self, model, x, arc_ids, arcs_accessibles, excluded_trip_ids=None):
+        """
+        Objectif : maximiser le score de fraude.
+        Anti-doublons : les trip_ids déjà utilisés par d'autres agents
+        reçoivent un malus de 50% pour favoriser la diversité des tournées.
+        """
         import pulp
+        excluded = excluded_trip_ids or set()
         model += pulp.lpSum(
-            arcs_accessibles[i].fraud_score * x[i]
+            arcs_accessibles[i].fraud_score
+            * (0.5 if arcs_accessibles[i].trip_id in excluded else 1.0)
+            * x[i]
             for i in arc_ids
             if arcs_accessibles[i].arc_type == ArcType.TRAIN
         ), "objectif_score_fraude"
@@ -294,6 +308,13 @@ class OrienteeringOptimizer(BaseOptimizer):
         la contrainte sink agrégée (C2b) force quand même la terminaison.
         """
         import pulp
+        # En mode ouvert (pas de sink), on utilise >= au lieu de == :
+        # le flux peut se "terminer" à n'importe quel nœud (le chemin s'arrête là).
+        # En mode fermé (avec sink), == est correct pour les nœuds intermédiaires
+        # car le sink agrégé gère la terminaison via _add_sink_constraint.
+        # Note : dans un graphe temps-étendu (DAG), >= n'autorise pas les cycles
+        # car le temps ne peut que progresser — la faisabilité est donc garantie.
+        open_end = not sink_nodes
         tous_noeuds = set(idx_sortants.keys()) | set(idx_entrants.keys())
         for node in tous_noeuds:
             if node == noeud_depart:
@@ -302,7 +323,12 @@ class OrienteeringOptimizer(BaseOptimizer):
                 continue  # géré par _add_sink_constraint
             entrants = pulp.lpSum(x[i] for i in idx_entrants.get(node, []))
             sortants = pulp.lpSum(x[i] for i in idx_sortants.get(node, []))
-            model += (entrants == sortants), f"flux_{hash(node) % 10**9}"
+            if open_end:
+                # Cas ouvert : le flux peut s'arrêter ici (in >= out)
+                model += (entrants >= sortants), f"flux_{hash(node) % 10**9}"
+            else:
+                # Cas fermé : flux doit traverser tous les nœuds intermédiaires (in == out)
+                model += (entrants == sortants), f"flux_{hash(node) % 10**9}"
 
     # ── Étape 4d : contrainte source ──────────────────────────────────────────
 
@@ -503,6 +529,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         heure_depart_min: int,
         duree_max_minutes: int,
         gare_arrivee_id: Optional[str] = None,
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
         """
         Greedy de secours — activé si PuLP absent ou CBC infaisable (sans contrainte retour).
@@ -526,7 +553,7 @@ class OrienteeringOptimizer(BaseOptimizer):
             )
 
         arcs_tournee, score_total, temps_ecoule = _greedy_walk(
-            graph, noeud_depart, duree_max_minutes
+            graph, noeud_depart, duree_max_minutes, excluded_trip_ids=excluded_trip_ids
         )
 
         if not arcs_tournee:
@@ -570,32 +597,40 @@ def _greedy_walk(
     graph: dict[Node, list[Arc]],
     noeud_depart: Node,
     duree_max_minutes: int,
+    excluded_trip_ids: Optional[set] = None,
 ) -> tuple[list[Arc], float, int]:
     """
     Parcours greedy depuis noeud_depart.
     À chaque étape : prend le meilleur arc TRAIN disponible dans le budget,
     sinon la correspondance la plus courte, sinon s'arrête.
+    Les trip_ids dans excluded_trip_ids reçoivent un malus de score (anti-doublons).
     """
+    excluded = excluded_trip_ids or set()
     noeud_courant = noeud_depart
     temps_ecoule  = 0
     arcs_tournee: list[Arc] = []
     score_total   = 0.0
+    visites: set[Node] = set()
 
     while temps_ecoule < duree_max_minutes:
         arcs_dispo = graph.get(noeud_courant, [])
         if not arcs_dispo:
             break
 
-        meilleur_train = _best_train_arc(arcs_dispo, temps_ecoule, duree_max_minutes)
+        meilleur_train = _best_train_arc(arcs_dispo, temps_ecoule, duree_max_minutes, excluded)
         if meilleur_train:
             arcs_tournee.append(meilleur_train)
             score_total   += meilleur_train.fraud_score
             temps_ecoule  += meilleur_train.duration_min
             noeud_courant  = meilleur_train.destination
+            visites.add(noeud_courant)
             continue
 
         corr = _shortest_correspondance(arcs_dispo, temps_ecoule, duree_max_minutes)
         if corr:
+            # Éviter les cycles de correspondance
+            if corr.destination in visites:
+                break
             arcs_tournee.append(corr)
             temps_ecoule  += corr.duration_min
             noeud_courant  = corr.destination
@@ -605,13 +640,26 @@ def _greedy_walk(
     return arcs_tournee, score_total, temps_ecoule
 
 
-def _best_train_arc(arcs: list[Arc], temps_ecoule: int, duree_max: int) -> Optional[Arc]:
+def _best_train_arc(
+    arcs: list[Arc],
+    temps_ecoule: int,
+    duree_max: int,
+    excluded: set | None = None,
+) -> Optional[Arc]:
+    """Sélectionne le meilleur arc TRAIN dans le budget, avec malus anti-doublons."""
+    excl = excluded or set()
     candidats = [
         a for a in arcs
         if a.arc_type == ArcType.TRAIN
         and temps_ecoule + a.duration_min <= duree_max
     ]
-    return max(candidats, key=lambda a: a.fraud_score) if candidats else None
+    if not candidats:
+        return None
+    # Score effectif avec pénalité pour les trips déjà utilisés par d'autres agents
+    return max(
+        candidats,
+        key=lambda a: a.fraud_score * (0.5 if a.trip_id in excl else 1.0),
+    )
 
 
 def _shortest_correspondance(arcs: list[Arc], temps_ecoule: int, duree_max: int) -> Optional[Arc]:

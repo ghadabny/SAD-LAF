@@ -89,7 +89,7 @@ class TourneeGenerationService:
 
     def generer(self, request: TourneeRequestV2Schema) -> str:
         """
-        Génère une tournée complète et l'enregistre EN_ATTENTE dans le store.
+        Génère une tournée complète et l'enregistre comme VALIDEE dans le store.
 
         Retourne le tournee_id généré.
 
@@ -97,10 +97,11 @@ class TourneeGenerationService:
             FileNotFoundError : GTFS non disponibles
             ValueError        : aucune tournée possible
         """
-        gare_arrivee    = request.gare_arrivee_effective
-        score_libre     = self._score_libre(request, gare_arrivee)
-        result          = self._resoudre(request, gare_arrivee)
-        score_perte_pct = self._calculer_perte(score_libre, result["score_total"])
+        gare_arrivee      = request.gare_arrivee_effective
+        excluded_trip_ids = self._get_used_trip_ids(request)
+        score_libre       = self._score_libre(request, gare_arrivee)
+        result            = self._resoudre(request, gare_arrivee, excluded_trip_ids)
+        score_perte_pct   = self._calculer_perte(score_libre, result["score_total"])
 
         now        = datetime.now()
         tournee_id = self._generer_id(request, now)
@@ -137,14 +138,16 @@ class TourneeGenerationService:
         self,
         request: TourneeRequestV2Schema,
         gare_arrivee: Optional[str],
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
-        """Lance le solver avec la contrainte de retour."""
+        """Lance le solver avec la contrainte de retour et l'anti-doublons."""
         result = self._solver(
             service_date      = request.service_date,
             gare_depart_id    = request.gare_depart_id,
             heure_depart_min  = request.heure_depart_min,
             duree_max_minutes = request.duree_max_minutes,
             gare_arrivee_id   = gare_arrivee,
+            excluded_trip_ids = excluded_trip_ids,
         )
         if not result["arcs"]:
             raise ValueError(
@@ -152,6 +155,17 @@ class TourneeGenerationService:
                 "Essayez le mode 'decouche' ou élargissez la plage PS/FS."
             )
         return result
+
+    @staticmethod
+    def _get_used_trip_ids(request: TourneeRequestV2Schema) -> set:
+        """
+        Anti-doublons : collecte tous les trip_ids déjà réservés par d'autres
+        agents pour la même date de service.
+        Ces trips recevront un malus dans le MILP pour favoriser la diversité.
+        """
+        store = get_booking_store()
+        booked = store.get_all_for_date(request.service_date)
+        return {tid for tid, agent in booked.items() if agent != request.agent_id}
 
     @staticmethod
     def _calculer_perte(score_libre: Optional[float], score_total: float) -> float:
@@ -222,9 +236,10 @@ class TourneeGenerationService:
             agent_id     = request.agent_id,
             service_date = request.service_date,
             trip_ids     = trip_ids,
+            auto_validate= True,
         )
         logger.info(
-            "[GenerationService] Tournée %s EN_ATTENTE pour %s (%d trains).",
+            "[GenerationService] Tournée %s VALIDEE pour %s (%d trains).",
             tournee_id, request.agent_id, len(trip_ids),
         )
 
