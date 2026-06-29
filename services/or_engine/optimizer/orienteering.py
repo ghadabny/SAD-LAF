@@ -131,6 +131,7 @@ class OrienteeringOptimizer(BaseOptimizer):
 
         self._add_objective(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
+        self._add_corridor_diversity_constraint(model, x, arc_ids, arcs_accessibles, max_per_corridor=2)
         self._add_min_duration_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_flow_constraints(
             model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
@@ -139,7 +140,9 @@ class OrienteeringOptimizer(BaseOptimizer):
         if sink_nodes:
             self._add_sink_constraint(model, x, idx_sortants, idx_entrants, sink_nodes)
             self._add_min_trains_constraint(model, x, arc_ids, arcs_accessibles)
-
+            self._add_no_intermediate_hub_constraint(
+                model, x, idx_sortants, idx_entrants, sink_nodes, arcs_accessibles
+            )
         status = self._run_cbc(model, pulp)
 
         if not self._is_feasible(status, pulp):
@@ -329,16 +332,53 @@ class OrienteeringOptimizer(BaseOptimizer):
         for node in tous_noeuds:
             if node == noeud_depart:
                 continue
-            if node in sink_nodes:
-                continue  # géré par _add_sink_constraint
             entrants = pulp.lpSum(x[i] for i in idx_entrants.get(node, []))
             sortants = pulp.lpSum(x[i] for i in idx_sortants.get(node, []))
+            if node in sink_nodes:
+                if not open_end:
+                    # Mode fermé : empêche un "départ libre" depuis un nœud sink
+                    model += (entrants >= sortants), f"flux_{hash(node) % 10 ** 9}"
+                continue  # terminaison gérée par _add_sink_constraint
             if open_end:
-                # Cas ouvert : le flux peut s'arrêter ici (in >= out)
-                model += (entrants >= sortants), f"flux_{hash(node) % 10**9}"
+                model += (entrants >= sortants), f"flux_{hash(node) % 10 ** 9}"
             else:
-                # Cas fermé : flux doit traverser tous les nœuds intermédiaires (in == out)
-                model += (entrants == sortants), f"flux_{hash(node) % 10**9}"
+                model += (entrants == sortants), f"flux_{hash(node) % 10 ** 9}"
+
+    def _add_corridor_diversity_constraint(self, model, x, arc_ids, arcs_accessibles, max_per_corridor=2):
+        """Limite le nombre de fois qu'un même axe (A→B) peut être emprunté."""
+        import pulp
+        from collections import defaultdict
+
+        corridors = defaultdict(list)
+        for i in arc_ids:
+            arc = arcs_accessibles[i]
+            if arc.arc_type == ArcType.TRAIN:
+                key = (arc.source.stop_id, arc.destination.stop_id)
+                corridors[key].append(i)
+
+        for key, ids in corridors.items():
+            if len(ids) > max_per_corridor:
+                model += (
+                        pulp.lpSum(x[i] for i in ids) <= max_per_corridor
+                ), f"corridor_{'_'.join(key)}"
+
+    def _add_no_intermediate_hub_constraint(self, model, x, idx_sortants, idx_entrants, sink_nodes, arcs_accessibles):
+        """Interdit de repartir d'un nœud sink atteint par TRAIN — force une tournée circulaire."""
+        import pulp
+        for node in sink_nodes:
+            # Ne s'applique qu'aux nœuds accessibles par un TRAIN (= vrais retours à la gare)
+            # Les nœuds accessibles uniquement par correspondance = attente au départ → pas de contrainte
+            has_train_entry = any(
+                arcs_accessibles[i].arc_type == ArcType.TRAIN
+                for i in idx_entrants.get(node, [])
+            )
+            if not has_train_entry:
+                continue
+            sortants = idx_sortants.get(node, [])
+            if sortants:
+                model += (
+                        pulp.lpSum(x[i] for i in sortants) == 0
+                ), f"no_hub_{hash(node) % 10 ** 9}"
 
     # ── Étape 4d : contrainte source ──────────────────────────────────────────
 
