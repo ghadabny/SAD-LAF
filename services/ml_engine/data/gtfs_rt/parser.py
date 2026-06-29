@@ -96,6 +96,8 @@ class GTFSRTParser:
         for entity in feed.entity:
             if not entity.HasField("alert"):
                 continue
+            if entity.alert.effect != gtfs_realtime_pb2.Alert.Effect.NO_SERVICE:
+                    continue
             for informed in entity.alert.informed_entity:
                 if informed.trip.trip_id:
                     trip_ids.append(informed.trip.trip_id)

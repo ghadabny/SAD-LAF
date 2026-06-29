@@ -137,6 +137,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         self._add_source_constraint(model, x, idx_sortants, noeud_depart)
         if sink_nodes:
             self._add_sink_constraint(model, x, idx_sortants, idx_entrants, sink_nodes)
+            self._add_min_trains_constraint(model, x, arc_ids, arcs_accessibles)
 
         status = self._run_cbc(model, pulp)
 
@@ -395,6 +396,13 @@ class OrienteeringOptimizer(BaseOptimizer):
             - pulp.lpSum(x[i] for i in sortants_sink)
             == 1
         ), "retour_gare_arrivee"
+
+    def _add_min_trains_constraint(self, model, x, arc_ids, arcs_accessibles):
+        """Force au moins 1 arc TRAIN actif — évite la solution triviale (correspondance seule)."""
+        import pulp
+        train_ids = [i for i in arc_ids if arcs_accessibles[i].arc_type == ArcType.TRAIN]
+        if train_ids:
+            model += (pulp.lpSum(x[i] for i in train_ids) >= 1), "min_un_train"
 
     # ── Étape 5 : résolution CBC ──────────────────────────────────────────────
 

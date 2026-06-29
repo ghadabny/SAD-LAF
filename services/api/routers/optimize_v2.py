@@ -155,11 +155,16 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         logger.exception("[optimize_v2] Erreur inattendue : %s", e)
         raise HTTPException(status_code=500, detail=f"Erreur interne : {e}")
 
-    if not result["arcs"]:
-        nb_trains_reels = sum(
-            1 for a in result["arcs"]
-            if a.arc_type == ArcType.TRAIN
-        )
+    nb_trains_reels = sum(1 for a in result["arcs"] if a.arc_type == ArcType.TRAIN)
+    if nb_trains_reels == 0:
+        # Aller-retour impossible avec trains → fallback sur résultat libre si disponible
+        if score_libre is not None and score_libre > 0 and gare_arrivee is not None:
+            result = _run_solver(request, gare_arrivee_id=None, excluded_trip_ids=excluded_trip_ids)
+            nb_trains_reels = sum(1 for a in result["arcs"] if a.arc_type == ArcType.TRAIN)
+            warning_messages.append(
+                "Aucun itinéraire aller-retour trouvé dans le budget — "
+                "tournée libre retournée (sans contrainte de retour en gare de départ)."
+            )
         if nb_trains_reels == 0:
             raise HTTPException(
                 status_code=404,

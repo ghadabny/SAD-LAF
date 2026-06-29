@@ -133,7 +133,7 @@ def fetch_scores_from_api(
     troncons_df: pd.DataFrame,
     service_date: date,
     predict_url: str = DEFAULT_PREDICT_API_URL,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
 ) -> list[PredictScoreItem]:
     """
     Appelle POST /predict/batch et retourne les scores ML.
