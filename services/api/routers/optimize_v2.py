@@ -56,6 +56,8 @@ from shared.schemas import (
     NodeSchema,
     OptimizeResponseV2Schema,
     RefuseTourneeRequest,
+    RegenerateTourneeRequest,
+    SelectTourneeRequest,
     TourneeRecordSchema,
     TourneeRequestV2Schema,
     TourneeSchema,
@@ -120,7 +122,8 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         request.heure_fs_min // 60, request.heure_fs_min % 60,
         request.mode,
     )
-
+    return _do_generate_tournee(request)
+""""
     warning_messages: list[str] = []
     gare_arrivee = request.gare_arrivee_effective
 
@@ -214,7 +217,7 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
         tournee=tournee,
         request=request,
         tournee_id=tournee_id,
-        statut=STATUT_VALIDEE,
+        statut=STATUT_EN_ATTENTE,
         score_perte_pct=round(score_perte_pct, 2),
         trains_en_conflit=[],
         csv_path=None,                      # sera mis à jour après l'export
@@ -253,20 +256,21 @@ def optimize_v2(request: TourneeRequestV2Schema) -> OptimizeResponseV2Schema:
     trip_ids = _extract_trip_ids(result["arcs"])
     if request.agent_id:
         store = get_booking_store()
+        # APRÈS
         store.register_tournee(
             tournee_id=tournee_id,
             agent_id=request.agent_id,
             service_date=request.service_date,
             trip_ids=trip_ids,
-            auto_validate=True,
+            auto_validate=False,
         )
         logger.info(
-            "[optimize_v2] Tournée %s VALIDEE automatiquement pour %s (%d trains).",
+            "[optimize_v2] Tournée %s EN_ATTENTE pour %s (%d trains) — attente sélection agent.",
             tournee_id, request.agent_id, len(trip_ids),
         )
 
     return response_obj
-
+"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /optimize/v2/validate
@@ -319,6 +323,105 @@ def validate_tournee(request: ValidateTourneeRequest) -> ValidateTourneeResponse
         record=TourneeRecordSchema(**record),
     )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /optimize/v2/select
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/v2/select",
+    response_model=ValidateTourneeResponse,
+    summary="Sélectionner une tournée — réservation effective des trains",
+)
+def select_tournee(request: SelectTourneeRequest) -> ValidateTourneeResponse:
+    """
+    L'agent confirme sa tournée : EN_ATTENTE → VALIDEE.
+
+    À partir de cet instant, les trains de la tournée sont réservés pour cet
+    agent. Une autre demande avec les mêmes paramètres produira une tournée
+    différente (les trains réservés sont exclus automatiquement).
+
+    Codes d'erreur :
+    - 404 : tournee_id inconnu
+    - 409 : conflit — trains déjà réservés par un autre agent
+    - 422 : tournée dans un statut incompatible
+    """
+    store = get_booking_store()
+    try:
+        record = store.select_tournee(
+            tournee_id=request.tournee_id,
+            agent_id=request.agent_id,
+            max_agents_per_train=request.max_agents_per_train,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        msg = str(e)
+        if "Conflit" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=422, detail=msg)
+
+    logger.info(
+        "[select_tournee] ✅ %s sélectionnée par %s",
+        request.tournee_id, request.agent_id,
+    )
+    return ValidateTourneeResponse(
+        tournee_id=record["tournee_id"],
+        statut=record["statut"],
+        message=(
+            f"Tournée {record['tournee_id']} confirmée par {request.agent_id}. "
+            f"{len(record['trip_ids'])} train(s) réservé(s)."
+        ),
+        record=TourneeRecordSchema(**record),
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /optimize/v2/regenerate
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/v2/regenerate",
+    response_model=OptimizeResponseV2Schema,
+    summary="Régénérer une tournée — rejette l'ancienne et en génère une nouvelle",
+)
+def regenerate_tournee(request: RegenerateTourneeRequest) -> OptimizeResponseV2Schema:
+    """
+    L'agent rejette sa tournée courante et demande une nouvelle génération
+    avec les mêmes paramètres (gare, PS/FS, date, mode).
+
+    Comportement :
+    1. La tournée rejetée passe en statut REFUSEE (trains jamais bookés → libres).
+    2. Une nouvelle tournée est générée en excluant les trains de la tournée
+       rejetée ET les trains déjà validés par d'autres agents.
+    3. La nouvelle tournée est retournée EN_ATTENTE — l'agent doit re-sélectionner.
+
+    Codes d'erreur :
+    - 404 : tournee_id_rejetee inconnu ou aucune nouvelle tournée possible
+    - 422 : tournée rejetée dans un statut incompatible (déjà sélectionnée, etc.)
+    - 503 : GTFS non disponibles
+    """
+    store = get_booking_store()
+
+    # Récupère les trip_ids AVANT de refuser (pour les exclure de la prochaine génération)
+    refused_trip_ids = set(store.get_trip_ids_for_tournee(request.tournee_id_rejetee))
+
+    try:
+        store.refuse_tournee(
+            tournee_id=request.tournee_id_rejetee,
+            refused_by=request.agent_id,
+            motif=request.motif or "Régénération demandée par l'agent",
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    logger.info(
+        "[regenerate_tournee] Tournée %s rejetée par %s — génération d'une nouvelle.",
+        request.tournee_id_rejetee, request.agent_id,
+    )
+
+    # Génère une nouvelle tournée en excluant les trains de la tournée rejetée
+    return _do_generate_tournee(request, extra_excluded_trip_ids=refused_trip_ids)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /optimize/v2/refuse
@@ -504,6 +607,128 @@ def _run_solver(
         gare_arrivee_id=gare_arrivee_id,
         excluded_trip_ids=excluded_trip_ids,
     )
+
+def _do_generate_tournee(
+    request: TourneeRequestV2Schema,
+    extra_excluded_trip_ids: set | None = None,
+) -> OptimizeResponseV2Schema:
+    """
+    Cœur de la génération de tournée — factorisé pour optimize_v2 et regenerate.
+
+    extra_excluded_trip_ids : trip_ids à exclure EN PLUS des trips déjà bookés
+    par d'autres agents (utilisé lors d'une régénération pour éviter de reproduire
+    la tournée rejetée).
+    """
+    warning_messages: list[str] = []
+    gare_arrivee = request.gare_arrivee_effective
+
+    # Anti-doublons : trips des autres agents (VALIDÉS)
+    excluded_trip_ids: set = set()
+    if request.agent_id:
+        booked = get_booking_store().get_all_for_date(request.service_date)
+        excluded_trip_ids = {tid for tid, ag in booked.items() if ag != request.agent_id}
+    # Trips de la tournée rejetée (jamais bookés, donc absents du store)
+    if extra_excluded_trip_ids:
+        excluded_trip_ids |= extra_excluded_trip_ids
+
+    effective_excluded = excluded_trip_ids or None
+
+    score_libre = None
+    if gare_arrivee is not None:
+        try:
+            result_libre = _run_solver(request, gare_arrivee_id=None, excluded_trip_ids=effective_excluded)
+            score_libre  = result_libre["score_total"]
+        except (ValueError, FileNotFoundError):
+            pass
+
+    try:
+        result = _run_solver(request, gare_arrivee_id=gare_arrivee, excluded_trip_ids=effective_excluded)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"GTFS non disponibles : {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("[_do_generate_tournee] Erreur inattendue : %s", e)
+        raise HTTPException(status_code=500, detail=f"Erreur interne : {e}")
+
+    nb_trains_reels = sum(1 for a in result["arcs"] if a.arc_type == ArcType.TRAIN)
+    if nb_trains_reels == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Aucune tournée aller-retour possible depuis cette gare dans cette fenêtre. "
+                "Élargissez la plage PS/FS ou utilisez le mode 'decouche'."
+            ),
+        )
+
+    score_perte_pct = 0.0
+    if score_libre is not None and score_libre > 0:
+        score_perte_pct = max(
+            0.0,
+            (score_libre - result["score_total"]) / score_libre * 100,
+        )
+
+    now        = datetime.now()
+    tournee_id = _generate_tournee_id(request.agent_id, request.service_date, now)
+
+    arcs_tournee        = result["arcs"]
+    gare_depart_schema  = _node_to_schema(arcs_tournee[0].source)
+    gare_arrivee_schema = _node_to_schema(arcs_tournee[-1].destination)
+
+    tournee = TourneeSchema(
+        arcs=[_arc_to_schema(a) for a in arcs_tournee],
+        score_total=result["score_total"],
+        duree_totale_minutes=result["duree_minutes"],
+        nb_trains=max(result["nb_trains"], 1),
+        gare_depart=gare_depart_schema,
+        gare_arrivee=gare_arrivee_schema,
+        service_date=request.service_date,
+        generated_at=now,
+    )
+
+    response_obj = OptimizeResponseV2Schema(
+        tournee=tournee,
+        request=request,
+        tournee_id=tournee_id,
+        statut=STATUT_EN_ATTENTE,
+        score_perte_pct=round(score_perte_pct, 2),
+        trains_en_conflit=[],
+        csv_path=None,
+        warning_messages=warning_messages,
+        optimized_at=now,
+    )
+
+    try:
+        exporter  = TourneeExporter()
+        formatter = TourneeFormatter()
+        df        = formatter.format_with_id(response_obj, tournee_id)
+        csv_path  = exporter.export_from_df(df, response_obj, tournee_id)
+        exporter.export_json_flat(df, response_obj, tournee_id)
+        try:
+            response_obj.csv_path = csv_path.name
+        except (AttributeError, TypeError):
+            response_obj = response_obj.model_copy(update={"csv_path": csv_path.name})
+        logger.info("[_do_generate_tournee] CSV exporté : %s", csv_path.name)
+    except Exception as e:
+        warning_messages.append(f"Export CSV indisponible : {e}")
+        logger.warning("[_do_generate_tournee] Export CSV échoué : %s", e)
+
+    trip_ids = _extract_trip_ids(result["arcs"])
+    if request.agent_id:
+        store = get_booking_store()
+        store.register_tournee(
+            tournee_id=tournee_id,
+            agent_id=request.agent_id,
+            service_date=request.service_date,
+            trip_ids=trip_ids,
+            auto_validate=False,
+        )
+        logger.info(
+            "[_do_generate_tournee] Tournée %s EN_ATTENTE pour %s (%d trains).",
+            tournee_id, request.agent_id, len(trip_ids),
+        )
+
+    return response_obj
 
 
 def _extract_trip_ids(arcs) -> list[str]:

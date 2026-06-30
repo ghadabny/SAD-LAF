@@ -226,6 +226,30 @@ class TripBookingStore:
         print(f"[BookingStore] ❌ Tournée refusée : {tournee_id} par {refused_by}")
         return dict(record)
 
+    def select_tournee(
+            self,
+            tournee_id: str,
+            agent_id: str,
+            max_agents_per_train: int = 1,
+    ) -> dict:
+        """
+        L'agent confirme sa tournée : EN_ATTENTE → VALIDEE, trains réservés.
+
+        Alias sémantique de validate_tournee() pour l'action 'Sélectionner'
+        côté agent (vs. 'Valider' côté manager N+1).
+        """
+        return self.validate_tournee(
+            tournee_id=tournee_id,
+            validated_by=agent_id,
+            max_agents_per_train=max_agents_per_train,
+        )
+
+    def get_trip_ids_for_tournee(self, tournee_id: str) -> list[str]:
+        """Retourne les trip_ids d'une tournée (pour exclusion lors d'une régénération)."""
+        with self._lock:
+            record = self._tournees.get(tournee_id)
+            return list(record["trip_ids"]) if record else []
+
     def cancel_tournee(self, tournee_id: str, cancelled_by: str) -> dict:
         with self._lock:
             if tournee_id not in self._tournees:
