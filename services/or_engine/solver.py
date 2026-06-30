@@ -133,7 +133,7 @@ def fetch_scores_from_api(
     troncons_df: pd.DataFrame,
     service_date: date,
     predict_url: str = DEFAULT_PREDICT_API_URL,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
 ) -> list[PredictScoreItem]:
     """
     Appelle POST /predict/batch et retourne les scores ML.
@@ -233,7 +233,7 @@ class TourneeOrchestrator:
         self._rt_cache      = rt_cache      or GTFSRTCache()
         self._rt_merger     = rt_merger     or GTFSRTMerger()
         self._graph_builder = graph_builder or TimeExpandedGraphBuilder()
-        self._optimizer     = optimizer     or OrienteeringOptimizer(time_limit_seconds=30)
+        self._optimizer     = optimizer     or OrienteeringOptimizer(time_limit_seconds=120)
 
     # ── Interface publique ────────────────────────────────────────────────────
 
@@ -245,6 +245,7 @@ class TourneeOrchestrator:
         duree_max_minutes: int = 360,
         predict_url:      str = DEFAULT_PREDICT_API_URL,
         gare_arrivee_id:  Optional[str] = None,
+        excluded_trip_ids: Optional[set] = None,
     ) -> dict:
         """
         Orchestre la génération complète d'une tournée optimisée.
@@ -290,6 +291,7 @@ class TourneeOrchestrator:
             heure_depart_min=heure_depart_min,
             duree_max_minutes=duree_max_minutes,
             gare_arrivee_id=gare_arrivee_id,
+            excluded_trip_ids=excluded_trip_ids,
         )
 
         logger.info(
@@ -393,6 +395,7 @@ def run(
     duree_max_minutes: int = 360,
     predict_url:       str = DEFAULT_PREDICT_API_URL,
     gare_arrivee_id:   Optional[str] = None,
+    excluded_trip_ids: Optional[set] = None,
 ) -> dict:
     """
     Shim de compatibilité — délègue à TourneeOrchestrator().run().
@@ -409,4 +412,5 @@ def run(
         duree_max_minutes=duree_max_minutes,
         predict_url=predict_url,
         gare_arrivee_id=gare_arrivee_id,
+        excluded_trip_ids=excluded_trip_ids,
     )

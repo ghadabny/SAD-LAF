@@ -101,24 +101,44 @@ class TripBookingStore:
         agent_id: str,
         service_date: date,
         trip_ids: list[str],
+        auto_validate: bool = True,
     ) -> None:
+        """
+        Enregistre une nouvelle tournée.
+
+        auto_validate=True (défaut) : la tournée est immédiatement VALIDEE
+        et les trains sont réservés. C'est le comportement normal lors d'une
+        génération initiale (décision métier : pas de validation manager requise).
+
+        auto_validate=False : la tournée passe EN_ATTENTE_VALIDATION.
+        Utilisé uniquement pour les demandes de modification d'une tournée
+        existante qui nécessitent une approbation N+1.
+        """
+        statut = STATUT_VALIDEE if auto_validate else STATUT_EN_ATTENTE
+        now    = datetime.now().isoformat()
         record = {
             "tournee_id":   tournee_id,
             "agent_id":     agent_id,
             "service_date": service_date.isoformat(),
             "trip_ids":     trip_ids,
-            "statut":       STATUT_EN_ATTENTE,
-            "created_at":   datetime.now().isoformat(),
-            "validated_by": None,
-            "validated_at": None,
+            "statut":       statut,
+            "created_at":   now,
+            "validated_by": agent_id if auto_validate else None,
+            "validated_at": now       if auto_validate else None,
             "refused_by":   None,
             "refused_at":   None,
         }
         with self._lock:
             self._tournees[tournee_id] = record
+            if auto_validate:
+                day_key   = service_date.isoformat()
+                day_store = self._store.setdefault(day_key, {})
+                for tid in trip_ids:
+                    day_store[tid] = agent_id
             self._persist()
+        label = "✅ validée automatiquement" if auto_validate else "📋 en attente"
         print(
-            f"[BookingStore] 📋 Tournée enregistrée : {tournee_id} "
+            f"[BookingStore] {label} : {tournee_id} "
             f"(agent={agent_id}, {len(trip_ids)} trains)"
         )
 
@@ -205,6 +225,30 @@ class TripBookingStore:
 
         print(f"[BookingStore] ❌ Tournée refusée : {tournee_id} par {refused_by}")
         return dict(record)
+
+    def select_tournee(
+            self,
+            tournee_id: str,
+            agent_id: str,
+            max_agents_per_train: int = 1,
+    ) -> dict:
+        """
+        L'agent confirme sa tournée : EN_ATTENTE → VALIDEE, trains réservés.
+
+        Alias sémantique de validate_tournee() pour l'action 'Sélectionner'
+        côté agent (vs. 'Valider' côté manager N+1).
+        """
+        return self.validate_tournee(
+            tournee_id=tournee_id,
+            validated_by=agent_id,
+            max_agents_per_train=max_agents_per_train,
+        )
+
+    def get_trip_ids_for_tournee(self, tournee_id: str) -> list[str]:
+        """Retourne les trip_ids d'une tournée (pour exclusion lors d'une régénération)."""
+        with self._lock:
+            record = self._tournees.get(tournee_id)
+            return list(record["trip_ids"]) if record else []
 
     def cancel_tournee(self, tournee_id: str, cancelled_by: str) -> dict:
         with self._lock:

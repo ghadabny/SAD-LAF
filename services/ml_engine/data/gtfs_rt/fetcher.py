@@ -45,6 +45,11 @@ class GTFSRTFetcher:
         return GTFSRTFeed(trip_updates_bytes=tu_bytes, service_alerts_bytes=sa_bytes)
 
     def _fetch_url(self, url: str) -> bytes:
-        response = requests.get(url, timeout=self.TIMEOUT_SECONDS)
+        proxies = (
+            {"http": config.HTTP_PROXY, "https": config.HTTPS_PROXY}
+            if config.HTTP_PROXY
+            else None
+        )
+        response = requests.get(url, timeout=self.TIMEOUT_SECONDS, proxies=proxies)
         response.raise_for_status()
         return response.content

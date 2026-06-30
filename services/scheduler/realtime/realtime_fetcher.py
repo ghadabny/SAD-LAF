@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+import re
 
 import requests
 from google.transit import gtfs_realtime_pb2
@@ -50,6 +51,7 @@ class RealtimeFetcher:
         4. cache_updater.update()            → cache Parquet ML (délégué)
         5. RealtimeUpdate                    → retourné au scheduler
     """
+    _TRAIN_NUMBER_RE = re.compile(r'OCE[A-Z]+(\d+)[A-Z]')
 
     def __init__(
         self,
@@ -221,7 +223,7 @@ class RealtimeFetcher:
                 })
             trip_updates.append({
                 "trip_id":           trip.trip_id,
-                "train_number":      trip.trip_headsign if trip.trip_headsign else "",
+                "train_number":      (m := self._TRAIN_NUMBER_RE.search(trip.trip_id)) and m.group(1) or "",
                 "route_id":          trip.route_id,
                 "stop_time_updates": stop_time_updates,
             })

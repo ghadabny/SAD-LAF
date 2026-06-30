@@ -251,6 +251,36 @@ class OptimizeResponseV2Schema(BaseModel):
     warning_messages:  list[str]  = Field(default_factory=list)
     optimized_at:      datetime   = Field(default_factory=datetime.now)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Selection et Regénération de Tournées
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SelectTourneeRequest(BaseModel):
+    """Body de POST /optimize/v2/select — l'agent confirme sa tournée."""
+    tournee_id:           str = Field(description="ID de la tournée à sélectionner")
+    agent_id:             str = Field(description="Identifiant de l'agent qui sélectionne")
+    max_agents_per_train: int = Field(
+        default=1, ge=1,
+        description="Nombre max d'agents autorisés sur le même train.",
+    )
+
+
+class RegenerateTourneeRequest(TourneeRequestV2Schema):
+    """
+    Body de POST /optimize/v2/regenerate.
+
+    L'agent rejette sa tournée courante et en demande une nouvelle
+    avec les mêmes paramètres. La tournée rejetée redevient disponible
+    pour d'autres agents.
+
+    Hérite de TourneeRequestV2Schema pour réutiliser tous les paramètres
+    de génération (gare, PS/FS, date, mode…).
+    """
+    tournee_id_rejetee: str           = Field(description="ID de la tournée à rejeter")
+    motif:              Optional[str] = Field(
+        default=None,
+        description="Motif du rejet (optionnel, usage log).",
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Validation — Requêtes et Réponses (POST /optimize/v2/validate, /refuse, /cancel)

@@ -83,6 +83,9 @@ class TourneeFormatter:
         if not arcs_train:
             return pd.DataFrame()
 
+        gare_finale = arcs_train[-1].destination.stop_name
+        heure_fin   = _minutes_to_hhmm(arcs_train[-1].destination.time_minutes)
+
         rows = []
         for idx, arc in enumerate(arcs_train):
             attente_min = self._attente_apres(response.tournee.arcs, arc)
@@ -104,6 +107,8 @@ class TourneeFormatter:
                 "score_total_tournee":  round(response.tournee.score_total, 4),
                 "nb_trains":            response.tournee.nb_trains,
                 "duree_totale_min":     response.tournee.duree_totale_minutes,
+                "gare_finale":          gare_finale,
+                "heure_fin":            heure_fin,
                 "score_perte_pct":      round(response.score_perte_pct, 1),
                 "warnings":             " | ".join(response.warning_messages) if response.warning_messages else "",
             }

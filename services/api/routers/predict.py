@@ -226,6 +226,8 @@ def predict_batch(request: PredictRequest) -> PredictResponse:
     # model_dump() sérialise les types Pydantic (date → str) en dict Python natif.
     # pd.DataFrame() reconstruit les types corrects automatiquement.
     df = pd.DataFrame([t.model_dump() for t in request.troncons])
+    if "service_date" in df.columns and df["service_date"].dtype == object:
+        df["service_date"] = pd.to_datetime(df["service_date"]).dt.date
 
     try:
         scores_series = predict_fraud_scores(df)
