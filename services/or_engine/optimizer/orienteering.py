@@ -129,7 +129,8 @@ class OrienteeringOptimizer(BaseOptimizer):
         model, x, arc_ids = self._build_model(arcs_accessibles)
         idx_sortants, idx_entrants = self._build_flow_index(arcs_accessibles)
 
-        self._add_objective(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
+        self._add_objective(model, x, arc_ids, arcs_accessibles)
+        self._add_exclusion_constraint(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_corridor_diversity_constraint(model, x, arc_ids, arcs_accessibles, max_per_corridor=2)
         self._add_min_duration_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
@@ -266,21 +267,36 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     # ── Étape 4a : objectif ───────────────────────────────────────────────────
 
-    def _add_objective(self, model, x, arc_ids, arcs_accessibles, excluded_trip_ids=None):
-        """
-        Objectif : maximiser le score de fraude.
-        Anti-doublons : les trip_ids déjà utilisés par d'autres agents
-        reçoivent un malus de 50% pour favoriser la diversité des tournées.
-        """
+    def _add_objective(self, model, x, arc_ids, arcs_accessibles):
+        """Objectif : maximiser le score de fraude des arcs TRAIN empruntés."""
         import pulp
-        excluded = excluded_trip_ids or set()
         model += pulp.lpSum(
-            arcs_accessibles[i].fraud_score
-            * (0.5 if arcs_accessibles[i].trip_id in excluded else 1.0)
-            * x[i]
+            arcs_accessibles[i].fraud_score * x[i]
             for i in arc_ids
             if arcs_accessibles[i].arc_type == ArcType.TRAIN
         ), "objectif_score_fraude"
+
+    def _add_exclusion_constraint(self, model, x, arc_ids, arcs_accessibles, excluded_trip_ids):
+        """
+        Anti-doublons (contrainte dure) : interdit tout arc TRAIN dont le
+        trip_id est déjà réservé par un autre agent (ou appartient à la
+        tournée rejetée lors d'une régénération).
+
+        Remplace l'ancien malus de 50% sur le score, qui n'empêchait pas
+        le solveur de réutiliser un train déjà booké si son fraud_score
+        restait suffisamment élevé.
+        """
+        import pulp
+        excluded = excluded_trip_ids or set()
+        if not excluded:
+            return
+        interdits = [
+            i for i in arc_ids
+            if arcs_accessibles[i].arc_type == ArcType.TRAIN
+               and arcs_accessibles[i].trip_id in excluded
+        ]
+        for i in interdits:
+            model += (x[i] == 0), f"exclusion_doublon_{i}"
 
     # ── Étape 4b : contrainte budget ──────────────────────────────────────────
 
@@ -703,20 +719,17 @@ def _best_train_arc(
     duree_max: int,
     excluded: set | None = None,
 ) -> Optional[Arc]:
-    """Sélectionne le meilleur arc TRAIN dans le budget, avec malus anti-doublons."""
+    """Sélectionne le meilleur arc TRAIN dans le budget, en excluant les trips déjà réservés."""
     excl = excluded or set()
     candidats = [
         a for a in arcs
         if a.arc_type == ArcType.TRAIN
         and temps_ecoule + a.duration_min <= duree_max
+        and a.trip_id not in excl
     ]
     if not candidats:
         return None
-    # Score effectif avec pénalité pour les trips déjà utilisés par d'autres agents
-    return max(
-        candidats,
-        key=lambda a: a.fraud_score * (0.5 if a.trip_id in excl else 1.0),
-    )
+    return max(candidats, key=lambda a: a.fraud_score)
 
 
 def _shortest_correspondance(arcs: list[Arc], temps_ecoule: int, duree_max: int) -> Optional[Arc]:
