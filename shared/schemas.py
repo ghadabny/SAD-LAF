@@ -176,6 +176,14 @@ class TourneeRequestV2Schema(BaseModel):
             "1 = JS normale. 4 = heure de pointe / opération civil. 0 = désactivé."
         ),
     )
+    pause_debut_min: Optional[int] = Field(
+        default=None, ge=0, le=1439,
+        description="Début de la pause agent (minutes depuis minuit). None = pas de pause.",
+    )
+    pause_fin_min: Optional[int] = Field(
+        default=None, ge=0, le=1439,
+        description="Fin de la pause agent (minutes depuis minuit). None = pas de pause.",
+    )
 
     @field_validator("gare_depart_id")
     @classmethod
@@ -202,6 +210,21 @@ class TourneeRequestV2Schema(BaseModel):
                 f"La fenêtre PS/FS est trop courte : {self.duree_max_minutes} min "
                 f"(minimum 30 min requis pour une tournée valide)."
             )
+        if (self.pause_debut_min is None) != (self.pause_fin_min is None):
+            raise ValueError(
+                "pause_debut_min et pause_fin_min doivent être fournis ensemble."
+            )
+        if self.pause_debut_min is not None:
+            if self.pause_fin_min <= self.pause_debut_min:
+                raise ValueError(
+                    f"pause_fin_min ({self.pause_fin_min}) doit être > "
+                    f"pause_debut_min ({self.pause_debut_min})."
+                )
+            if self.pause_debut_min < self.heure_depart_min or self.pause_fin_min > self.heure_fs_min:
+                raise ValueError(
+                    f"La pause [{self.pause_debut_min}, {self.pause_fin_min}] doit être "
+                    f"dans la journée de service [{self.heure_depart_min}, {self.heure_fs_min}]."
+                )
         return self
 
     @property

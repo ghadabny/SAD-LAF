@@ -151,6 +151,8 @@ class TourneeGenerationService:
             duree_max_minutes = request.duree_max_minutes,
             gare_arrivee_id   = gare_arrivee,
             excluded_trip_ids = excluded_trip_ids,
+            pause_debut_min   = request.pause_debut_min,
+            pause_fin_min     = request.pause_fin_min,
         )
         if not result["arcs"]:
             raise ValueError(
@@ -421,6 +423,8 @@ class FileListener:
                 max_agents_per_train = schema_fichier.max_agents_per_train,
                 agent_id             = schema_fichier.agent_id,
                 gare_arrivee_id      = schema_fichier.gare_arrivee_id,
+                pause_debut_min      = schema_fichier.pause_debut_min,
+                pause_fin_min        = schema_fichier.pause_fin_min,
             )
             self._generation_service.generer(request)  # retourne (id, response)
             _archiver_succes(fichier_processing, self._requests_processed)
