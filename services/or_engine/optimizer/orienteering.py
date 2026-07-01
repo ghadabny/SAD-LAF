@@ -105,45 +105,23 @@ class OrienteeringOptimizer(BaseOptimizer):
             graph, gare_depart_id, heure_depart_min, duree_max_minutes
         )
 
-        # Validation des nœuds sink si contrainte de retour
-        sink_nodes: set[Node] = set()
-        if gare_arrivee_id is not None:
-            sink_nodes = self._find_sink_nodes(arcs_accessibles, gare_arrivee_id)
-
-            # IMPORTANT : le nœud de départ ne peut jamais être un nœud final —
-            # l'agent part de là, il n'y revient qu'à un instant ULTÉRIEUR.
-            # Dans le graphe temps-étendu, le retour à la même gare est représenté
-            # par un nœud distinct (même stop_id, heure différente). Inclure
-            # noeud_depart dans sink_nodes crée une contradiction MILP :
-            #   source_unique: x[arc_départ] = 1
-            #   sink: x[arc_retour] - x[arc_départ] = 1  → x[arc_retour] = 2 (impossible)
-            sink_nodes = sink_nodes - {noeud_depart}
-
-            if not sink_nodes:
-                raise ValueError(
-                    f"[OrienteeringOptimizer] Aucun train n'arrive à {gare_arrivee_id} "
-                    f"dans le budget de {duree_max_minutes} min depuis {gare_depart_id}. "
-                    f"Essayez d'élargir la fenêtre PS/FS ou de changer la gare d'arrivée."
-                )
-
         model, x, arc_ids = self._build_model(arcs_accessibles)
         idx_sortants, idx_entrants = self._build_flow_index(arcs_accessibles)
 
         self._add_objective(model, x, arc_ids, arcs_accessibles)
-        self._add_exclusion_constraint(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
+        #self._add_exclusion_constraint(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
-        self._add_corridor_diversity_constraint(model, x, arc_ids, arcs_accessibles, max_per_corridor=4)
-        self._add_min_duration_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_flow_constraints(
-            model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
+            model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes=set()
         )
         self._add_source_constraint(model, x, idx_sortants, noeud_depart)
-        if sink_nodes:
-            self._add_sink_constraint(model, x, idx_sortants, idx_entrants, sink_nodes)
+        if gare_arrivee_id is not None:
+            self._add_return_constraint(model, x, arc_ids, arcs_accessibles, gare_arrivee_id,idx_sortants)
             self._add_min_trains_constraint(model, x, arc_ids, arcs_accessibles)
-            self._add_no_intermediate_hub_constraint(
-                model, x, idx_sortants, idx_entrants, sink_nodes, arcs_accessibles
-            )
+            #self._add_single_arrival_constraint(model, x, idx_entrants, sink_nodes)
+           # self._add_no_intermediate_hub_constraint(
+            #    model, x, idx_sortants, idx_entrants, sink_nodes, arcs_accessibles
+            #)
         status = self._run_cbc(model, pulp)
 
         if not self._is_feasible(status, pulp):
@@ -218,31 +196,22 @@ class OrienteeringOptimizer(BaseOptimizer):
     # ── Étape 1b : identification des nœuds sink ──────────────────────────────
 
     def _find_sink_nodes(
-        self,
-        arcs_accessibles: list[Arc],
-        gare_arrivee_id: str,
+            self,
+            arcs_accessibles: list[Arc],
+            gare_arrivee_id: str,
     ) -> set[Node]:
-        """
-        Retourne l'ensemble des nœuds du sous-graphe dont stop_id == gare_arrivee_id.
-
-        Un arc arrive à un sink si son destination.stop_id == gare_arrivee_id.
-        Ces nœuds représentent "être à la gare d'arrivée à un instant quelconque".
-
-        Si ce set est vide, la contrainte de retour est physiquement impossible.
-        """
         sink_nodes: set[Node] = set()
         for arc in arcs_accessibles:
-            if arc.destination.stop_id == gare_arrivee_id:
+            if (
+                    arc.arc_type == ArcType.TRAIN
+                    and arc.destination.stop_id == gare_arrivee_id
+            ):
                 sink_nodes.add(arc.destination)
-            # Un arc de correspondance à la gare arrivée est aussi un nœud sink
-            if arc.source.stop_id == gare_arrivee_id:
-                sink_nodes.add(arc.source)
         logger.info(
             "[OrienteeringOptimizer] Sink nodes pour %s : %d nœuds identifiés.",
             gare_arrivee_id, len(sink_nodes),
         )
         return sink_nodes
-
     # ── Étape 2 : construction du modèle PuLP ─────────────────────────────────
 
     def _build_model(self, arcs_accessibles: list[Arc]):
@@ -345,20 +314,19 @@ class OrienteeringOptimizer(BaseOptimizer):
         # car le temps ne peut que progresser — la faisabilité est donc garantie.
         open_end = not sink_nodes
         tous_noeuds = set(idx_sortants.keys()) | set(idx_entrants.keys())
-        for node in tous_noeuds:
+        for idx, node in enumerate(tous_noeuds):
             if node == noeud_depart:
                 continue
             entrants = pulp.lpSum(x[i] for i in idx_entrants.get(node, []))
             sortants = pulp.lpSum(x[i] for i in idx_sortants.get(node, []))
             if node in sink_nodes:
                 if not open_end:
-                    # Mode fermé : empêche un "départ libre" depuis un nœud sink
-                    model += (entrants >= sortants), f"flux_{hash(node) % 10 ** 9}"
-                continue  # terminaison gérée par _add_sink_constraint
+                    model += (entrants >= sortants), f"flux_{idx}"
+                continue
             if open_end:
-                model += (entrants >= sortants), f"flux_{hash(node) % 10 ** 9}"
+                model += (entrants >= sortants), f"flux_{idx}"
             else:
-                model += (entrants == sortants), f"flux_{hash(node) % 10 ** 9}"
+                model += (entrants == sortants), f"flux_{idx}"
 
     def _add_corridor_diversity_constraint(self, model, x, arc_ids, arcs_accessibles, max_per_corridor=2):
         """Limite le nombre de fois qu'un même axe (A→B) peut être emprunté."""
@@ -468,6 +436,53 @@ class OrienteeringOptimizer(BaseOptimizer):
         train_ids = [i for i in arc_ids if arcs_accessibles[i].arc_type == ArcType.TRAIN]
         if train_ids:
             model += (pulp.lpSum(x[i] for i in train_ids) >= 1), "min_un_train"
+
+    def _add_return_constraint(self, model, x, arc_ids, arcs_accessibles, gare_arrivee_id: str,
+                               idx_sortants: dict):
+        """
+        Exactement 1 arc TRAIN arrive à gare_arrivee_id, et le chemin s'y termine.
+
+        Contrainte de conflit : si l'arc de retour i_k est actif (x[i_k]=1),
+        tous les arcs sortants du nœud de destination sont forcés à 0.
+        Si i_k n'est pas actif, les sortants sont libres (la chaîne CORR peut passer).
+        """
+        import pulp
+        arcs_retour = [
+            i for i in arc_ids
+            if arcs_accessibles[i].arc_type == ArcType.TRAIN
+               and arcs_accessibles[i].destination.stop_id == gare_arrivee_id
+        ]
+        if not arcs_retour:
+            raise ValueError(
+                f"[OrienteeringOptimizer] Aucun train n'arrive à {gare_arrivee_id} "
+                f"dans le sous-graphe accessible. Élargissez la fenêtre PS/FS."
+            )
+        model += (
+                pulp.lpSum(x[i] for i in arcs_retour) == 1
+        ), "retour_gare_arrivee"
+
+        # Conflit conditionnel : si arc de retour i_k actif → sortants du nœud bloqués.
+        # Contrairement à fin_retour qui bloquait tous les nœuds en permanence,
+        # ici seul le nœud CHOISI par CBC est bloqué. Les autres restent traversables.
+        for ctr_idx, i_k in enumerate(arcs_retour):
+            node = arcs_accessibles[i_k].destination
+            for j in idx_sortants.get(node, []):
+                model += (x[j] + x[i_k] <= 1), f"conflit_retour_{ctr_idx}_{j}"
+
+    def _add_single_arrival_constraint(
+            self, model, x, idx_entrants, sink_nodes
+    ):
+        """Exactement 1 arc arrive à la gare d'arrivée — empêche le ping-pong hub."""
+        import pulp
+        entrants_sink = [
+            i
+            for n in sink_nodes
+            for i in idx_entrants.get(n, [])
+        ]
+        if entrants_sink:
+            model += (
+                    pulp.lpSum(x[i] for i in entrants_sink) == 1
+            ), "arrivee_unique_sink"
 
     # ── Étape 5 : résolution CBC ──────────────────────────────────────────────
 
