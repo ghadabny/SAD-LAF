@@ -87,7 +87,9 @@ class OrienteeringOptimizer(BaseOptimizer):
             )
         return self._solve_milp(
             graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
-            excluded_trip_ids=excluded_trip_ids,pause_debut_min=pause_debut_min, pause_fin_min=pause_fin_min,
+            excluded_trip_ids=excluded_trip_ids,
+            pause_debut_min=pause_debut_min,
+            pause_fin_min=pause_fin_min,
         )
 
     # ── Orchestration MILP ────────────────────────────────────────────────────

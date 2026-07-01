@@ -419,4 +419,6 @@ def run(
         predict_url=predict_url,
         gare_arrivee_id=gare_arrivee_id,
         excluded_trip_ids=excluded_trip_ids,
+        pause_debut_min=pause_debut_min,
+        pause_fin_min=pause_fin_min,
     )
