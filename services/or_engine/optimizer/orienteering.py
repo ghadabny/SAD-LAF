@@ -132,7 +132,7 @@ class OrienteeringOptimizer(BaseOptimizer):
         self._add_objective(model, x, arc_ids, arcs_accessibles)
         self._add_exclusion_constraint(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
-        self._add_corridor_diversity_constraint(model, x, arc_ids, arcs_accessibles, max_per_corridor=2)
+        self._add_corridor_diversity_constraint(model, x, arc_ids, arcs_accessibles, max_per_corridor=4)
         self._add_min_duration_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
         self._add_flow_constraints(
             model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes

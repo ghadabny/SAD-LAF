@@ -241,9 +241,12 @@ def regenerate_tournee(request: RegenerateTourneeRequest) -> OptimizeResponseV2S
     avec les mêmes paramètres (gare, PS/FS, date, mode).
 
     Comportement :
-    1. La tournée rejetée passe en statut REFUSEE (trains jamais bookés → libres).
-    2. Une nouvelle tournée est générée en excluant les trains de la tournée
+    1. Une nouvelle tournée est générée en excluant les trains de la tournée
        rejetée ET les trains déjà validés par d'autres agents.
+    2. Seulement si la génération réussit, la tournée rejetée passe en REFUSEE
+       (trains jamais bookés → libres). Si la génération échoue (404/503),
+       la tournée rejetée reste EN_ATTENTE_VALIDATION et l'agent peut
+       réessayer le regenerate avec d'autres paramètres.
     3. La nouvelle tournée est retournée EN_ATTENTE — l'agent doit re-sélectionner.
 
     Codes d'erreur :
@@ -253,9 +256,20 @@ def regenerate_tournee(request: RegenerateTourneeRequest) -> OptimizeResponseV2S
     """
     store = get_booking_store()
 
-    # Récupère les trip_ids AVANT de refuser (pour les exclure de la prochaine génération)
+    # Vérifie l'existence et le statut AVANT de générer, sans encore refuser.
     refused_trip_ids = set(store.get_trip_ids_for_tournee(request.tournee_id_rejetee))
 
+    logger.info(
+        "[regenerate_tournee] Tentative de régénération pour %s (rejet de %s en attente de succès).",
+        request.agent_id, request.tournee_id_rejetee,
+    )
+
+    # Génère la nouvelle tournée AVANT de toucher au statut de l'ancienne.
+    # Si ça échoue (404/503), l'ancienne tournée reste EN_ATTENTE_VALIDATION
+    # et l'agent peut réessayer regenerate avec d'autres paramètres.
+    response = _do_generate_tournee(request, extra_excluded_trip_ids=refused_trip_ids)
+
+    # La génération a réussi → on peut maintenant refuser l'ancienne tournée.
     try:
         store.refuse_tournee(
             tournee_id=request.tournee_id_rejetee,
@@ -268,12 +282,11 @@ def regenerate_tournee(request: RegenerateTourneeRequest) -> OptimizeResponseV2S
         raise HTTPException(status_code=422, detail=str(e))
 
     logger.info(
-        "[regenerate_tournee] Tournée %s rejetée par %s — génération d'une nouvelle.",
-        request.tournee_id_rejetee, request.agent_id,
+        "[regenerate_tournee] Tournée %s rejetée par %s — nouvelle tournée %s générée.",
+        request.tournee_id_rejetee, request.agent_id, response.tournee_id,
     )
 
-    # Génère une nouvelle tournée en excluant les trains de la tournée rejetée
-    return _do_generate_tournee(request, extra_excluded_trip_ids=refused_trip_ids)
+    return response
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /optimize/v2/refuse

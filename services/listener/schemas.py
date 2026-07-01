@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -94,37 +94,28 @@ class TourneeRequestFileSchema(BaseModel):
 # Décision manager (validate / refuse / cancel)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Actions reconnues par le listener
-_ACTIONS_VALIDES = {"VALIDATE", "REFUSE", "CANCEL"}
-
+    # Remplace _ACTIONS_VALIDES
+_ACTIONS_VALIDES = {"VALIDATE", "SELECT", "REFUSE", "CANCEL", "REGENERATE"}
 
 class DecisionFileSchema(BaseModel):
-    """
-    Schéma du fichier JSON déposé dans data/decisions/ par Power Automate.
+    action: str = Field(description="Action : SELECT, REGENERATE, REFUSE ou CANCEL")
+    tournee_id: str = Field(description="Tournée à sélectionner ou rejeter (format TRN_…)")
+    acteur_id: str = Field(description="Identifiant de l'agent")
+    motif: Optional[str] = Field(default=None)
 
-    Représente une décision d'un manager (N+1) sur une tournée existante.
-    Le champ `action` est normalisé en majuscules et validé contre la liste
-    des actions reconnues.
-
-    Exemple de fichier : dec_VALIDATE_TRN_AGENT_001_20260514_3A7F_20260513T141500.json
-    """
-    action:     str            = Field(description="Action : VALIDATE, REFUSE ou CANCEL")
-    tournee_id: str            = Field(description="Identifiant de la tournée (format TRN_…)")
-    acteur_id:  str            = Field(description="Identifiant du manager effectuant la décision")
-    motif:      Optional[str]  = Field(
-        default=None,
-        description="Motif textuel (obligatoire pour REFUSE, optionnel pour CANCEL)",
-    )
+    # Champs requis uniquement pour action=REGENERATE
+    # Power Automate re-envoie les mêmes params que la requête originale
+    gare_depart_id: Optional[str] = Field(default=None)
+    heure_ps_min: Optional[int] = Field(default=None)
+    heure_fs_min: Optional[int] = Field(default=None)
+    service_date: Optional[date] = Field(default=None)
+    mode: Optional[Literal["aller_retour", "decouche"]] = Field(default=None)
+    gare_arrivee_id: Optional[str] = Field(default=None)
+    max_agents_per_train: Optional[int] = Field(default=1)
 
     @field_validator("action", mode="before")
     @classmethod
     def normaliser_et_valider_action(cls, v: str) -> str:
-        """
-        Normalise l'action en majuscules et vérifie qu'elle est reconnue.
-
-        Exemples valides : "VALIDATE", "validate", "Refuse"
-        Exemples invalides : "APPROVE", "DELETE", ""
-        """
         normalise = str(v).strip().upper()
         if normalise not in _ACTIONS_VALIDES:
             raise ValueError(
@@ -132,6 +123,21 @@ class DecisionFileSchema(BaseModel):
                 f"Valeurs acceptées : {', '.join(sorted(_ACTIONS_VALIDES))}."
             )
         return normalise
+
+    @model_validator(mode="after")
+    def valider_champs_regeneration(self) -> "DecisionFileSchema":
+        if self.action == "REGENERATE":
+            manquants = [
+                f for f in ("gare_depart_id", "heure_ps_min", "heure_fs_min", "service_date")
+                if getattr(self, f) is None
+            ]
+            if manquants:
+                raise ValueError(
+                    f"REGENERATE requiert les champs : {', '.join(manquants)}."
+                )
+        return self
+
+
 
     @field_validator("tournee_id")
     @classmethod

@@ -87,18 +87,20 @@ class TourneeGenerationService:
         self._exporter  = exporter  or TourneeExporter()
         self._formatter = formatter or TourneeFormatter()
 
-    def generer(self, request: TourneeRequestV2Schema) -> str:
+    def generer(self, request: TourneeRequestV2Schema, extra_excluded: set | None = None) -> tuple[str, OptimizeResponseV2Schema]:
         """
-        Génère une tournée complète et l'enregistre comme VALIDEE dans le store.
+         Génère une tournée complète et l'enregistre comme EN_ATTENTE dans le store.
+        Écrit le résultat dans data/results/ pour que Power Automate puisse le lire.
 
-        Retourne le tournee_id généré.
+        Retourne (tournee_id, response_obj).
 
         Lève :
             FileNotFoundError : GTFS non disponibles
             ValueError        : aucune tournée possible
         """
         gare_arrivee      = request.gare_arrivee_effective
-        excluded_trip_ids = self._get_used_trip_ids(request)
+        cross_agent_exclusions = self._get_used_trip_ids(request)
+        excluded_trip_ids = cross_agent_exclusions | (extra_excluded or set())
         score_libre       = self._score_libre(request, gare_arrivee)
         result            = self._resoudre(request, gare_arrivee, excluded_trip_ids)
         score_perte_pct   = self._calculer_perte(score_libre, result["score_total"])
@@ -109,8 +111,9 @@ class TourneeGenerationService:
         response_obj = self._construire_reponse(request, result, tournee_id, score_perte_pct, now)
         self._exporter_csv(response_obj, tournee_id)
         self._enregistrer_store(request, result, tournee_id)
+        self._ecrire_resultat(response_obj, tournee_id)
 
-        return tournee_id
+        return tournee_id, response_obj
 
     # ── Étapes privées ────────────────────────────────────────────────────────
 
@@ -217,6 +220,18 @@ class TourneeGenerationService:
         self._exporter.export_json_flat(df, response_obj, tournee_id)
         logger.info("[GenerationService] CSV exporté : %s", csv_path.name)
 
+    def _ecrire_resultat(self, response_obj: OptimizeResponseV2Schema, tournee_id: str) -> None:
+        """Écrit le résultat JSON dans data/results/ pour Power Automate."""
+        results_dir = config.RESULTS_DIR
+        results_dir.mkdir(parents=True, exist_ok=True)
+        dest = results_dir / f"{tournee_id}.json"
+        with dest.open("w", encoding="utf-8") as f:
+            json.dump(
+                response_obj.model_dump(mode="json"),
+                f, ensure_ascii=False, indent=2, default=str,
+            )
+        logger.info("[GenerationService] Résultat écrit : %s", dest.name)
+
     @staticmethod
     def _enregistrer_store(
         request: TourneeRequestV2Schema,
@@ -236,13 +251,12 @@ class TourneeGenerationService:
             agent_id     = request.agent_id,
             service_date = request.service_date,
             trip_ids     = trip_ids,
-            auto_validate= True,
+            auto_validate= False,
         )
         logger.info(
-            "[GenerationService] Tournée %s VALIDEE pour %s (%d trains).",
+            "[GenerationService] Tournée %s EN_ATTENTE pour %s (%d trains).",
             tournee_id, request.agent_id, len(trip_ids),
         )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Handlers de décision — OCP
@@ -259,6 +273,49 @@ def _handle_validate(decision: DecisionFileSchema) -> None:
     )
     logger.info("[Listener] Tournée %s validée par %s.", decision.tournee_id, decision.acteur_id)
 
+def _handle_select(decision: DecisionFileSchema) -> None:
+    """L'agent sélectionne/confirme sa tournée EN_ATTENTE."""
+    get_booking_store().validate_tournee(
+        tournee_id           = decision.tournee_id,
+        validated_by         = decision.acteur_id,
+        max_agents_per_train = 1,
+    )
+    logger.info("[Listener] Tournée %s sélectionnée par %s.", decision.tournee_id, decision.acteur_id)
+
+
+def _handle_regenerate(decision: DecisionFileSchema) -> None:
+    """
+    L'agent rejette sa tournée et en demande une nouvelle.
+    Generate-before-refuse : génère d'abord, refuse seulement si ça réussit.
+    """
+    from shared.schemas import TourneeRequestV2Schema as Req
+    store = get_booking_store()
+
+    refused_trip_ids = set(store.get_trip_ids_for_tournee(decision.tournee_id))
+
+    request = Req(
+        gare_depart_id       = decision.gare_depart_id,
+        heure_ps_min         = decision.heure_ps_min,
+        heure_fs_min         = decision.heure_fs_min,
+        service_date         = decision.service_date,
+        mode                 = decision.mode or "aller_retour",
+        agent_id             = decision.acteur_id,
+        gare_arrivee_id      = decision.gare_arrivee_id,
+        max_agents_per_train = decision.max_agents_per_train or 1,
+    )
+
+    service = TourneeGenerationService()
+    new_tournee_id, _ = service.generer(request, extra_excluded=refused_trip_ids)
+
+    store.refuse_tournee(
+        tournee_id = decision.tournee_id,
+        refused_by = decision.acteur_id,
+        motif      = decision.motif or "Régénération demandée par l'agent",
+    )
+    logger.info(
+        "[Listener] Tournée %s régénérée → nouvelle : %s.",
+        decision.tournee_id, new_tournee_id,
+    )
 
 def _handle_refuse(decision: DecisionFileSchema) -> None:
     """Refuse une tournée EN_ATTENTE dans le store."""
@@ -284,9 +341,11 @@ def _handle_cancel(decision: DecisionFileSchema) -> None:
 
 # Dispatch OCP — ajouter ici sans toucher à FileListener
 _DECISION_HANDLERS: dict[str, Callable[[DecisionFileSchema], None]] = {
-    "VALIDATE": _handle_validate,
-    "REFUSE":   _handle_refuse,
-    "CANCEL":   _handle_cancel,
+    "VALIDATE":   _handle_validate,   # rétrocompatibilité
+    "SELECT":     _handle_select,
+    "REFUSE":     _handle_refuse,
+    "CANCEL":     _handle_cancel,
+    "REGENERATE": _handle_regenerate,
 }
 
 
@@ -363,7 +422,7 @@ class FileListener:
                 agent_id             = schema_fichier.agent_id,
                 gare_arrivee_id      = schema_fichier.gare_arrivee_id,
             )
-            self._generation_service.generer(request)
+            self._generation_service.generer(request)  # retourne (id, response)
             _archiver_succes(fichier_processing, self._requests_processed)
             logger.info("[Listener] ✅ Requête traitée : %s", fichier.name)
 

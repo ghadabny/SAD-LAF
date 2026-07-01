@@ -77,6 +77,10 @@ class AppConfig:
     # Les sous-dossiers processed/ et errors/ sont versionnés via .gitkeep.
     REQUESTS_DIR:  Path = Path(os.getenv("REQUESTS_DIR",  "data/requests"))
     DECISIONS_DIR: Path = Path(os.getenv("DECISIONS_DIR", "data/decisions"))
+    RESULTS_DIR: Path = Path(os.getenv("RESULTS_DIR", "data/results"))
+
+    #   data/results/
+    #       └── TRN_AGENT_001_20260803_XXXX.json  ← résultats lus par Power Automate
 
     # Intervalles de polling du listener (en secondes)
     REQUEST_LISTENER_INTERVAL_SECONDS:  int = int(
