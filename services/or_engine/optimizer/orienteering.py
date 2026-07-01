@@ -65,6 +65,8 @@ class OrienteeringOptimizer(BaseOptimizer):
         duree_max_minutes: int,
         gare_arrivee_id: Optional[str] = None,
         excluded_trip_ids: Optional[set] = None,
+        pause_debut_min: Optional[int] = None,
+        pause_fin_min: Optional[int] = None,
     ) -> dict:
         """
         Résout le problème d'Orienteering via MILP (PuLP/CBC).
@@ -85,43 +87,56 @@ class OrienteeringOptimizer(BaseOptimizer):
             )
         return self._solve_milp(
             graph, gare_depart_id, heure_depart_min, duree_max_minutes, gare_arrivee_id,
-            excluded_trip_ids=excluded_trip_ids,
+            excluded_trip_ids=excluded_trip_ids,pause_debut_min=pause_debut_min, pause_fin_min=pause_fin_min,
         )
 
     # ── Orchestration MILP ────────────────────────────────────────────────────
 
     def _solve_milp(
-        self,
-        graph: dict[Node, list[Arc]],
-        gare_depart_id: str,
-        heure_depart_min: int,
-        duree_max_minutes: int,
-        gare_arrivee_id: Optional[str],
-        excluded_trip_ids: Optional[set] = None,
+            self,
+            graph: dict[Node, list[Arc]],
+            gare_depart_id: str,
+            heure_depart_min: int,
+            duree_max_minutes: int,
+            gare_arrivee_id: Optional[str],
+            excluded_trip_ids: Optional[set] = None,
+            pause_debut_min: Optional[int] = None,
+            pause_fin_min: Optional[int] = None,
     ) -> dict:
         import pulp
 
         noeud_depart, arcs_accessibles = self._build_subgraph(
             graph, gare_depart_id, heure_depart_min, duree_max_minutes
         )
-
         model, x, arc_ids = self._build_model(arcs_accessibles)
         idx_sortants, idx_entrants = self._build_flow_index(arcs_accessibles)
 
-        self._add_objective(model, x, arc_ids, arcs_accessibles)
-        #self._add_exclusion_constraint(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
+        self._add_objective(model, x, arc_ids, arcs_accessibles, excluded_trip_ids)
         self._add_budget_constraint(model, x, arc_ids, arcs_accessibles, duree_max_minutes)
-        self._add_flow_constraints(
-            model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes=set()
-        )
         self._add_source_constraint(model, x, idx_sortants, noeud_depart)
+
+        if pause_debut_min is not None and pause_fin_min is not None:
+            self._add_pause_constraint(
+                model, x, arc_ids, arcs_accessibles, pause_debut_min, pause_fin_min
+            )
+
         if gare_arrivee_id is not None:
-            self._add_return_constraint(model, x, arc_ids, arcs_accessibles, gare_arrivee_id,idx_sortants)
+            sink_nodes = self._find_sink_nodes(arcs_accessibles, gare_arrivee_id)
+            if not sink_nodes:
+                raise ValueError(
+                    f"[OrienteeringOptimizer] Aucun train n'arrive à {gare_arrivee_id} "
+                    f"dans le sous-graphe. Élargissez la fenêtre PS/FS."
+                )
+            self._add_flow_constraints(
+                model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes
+            )
+            self._add_sink_constraint(model, x, idx_sortants, idx_entrants, sink_nodes)
             self._add_min_trains_constraint(model, x, arc_ids, arcs_accessibles)
-            #self._add_single_arrival_constraint(model, x, idx_entrants, sink_nodes)
-           # self._add_no_intermediate_hub_constraint(
-            #    model, x, idx_sortants, idx_entrants, sink_nodes, arcs_accessibles
-            #)
+        else:
+            self._add_flow_constraints(
+                model, x, idx_sortants, idx_entrants, noeud_depart, sink_nodes=set()
+            )
+
         status = self._run_cbc(model, pulp)
 
         if not self._is_feasible(status, pulp):
@@ -236,15 +251,21 @@ class OrienteeringOptimizer(BaseOptimizer):
 
     # ── Étape 4a : objectif ───────────────────────────────────────────────────
 
-    def _add_objective(self, model, x, arc_ids, arcs_accessibles):
-        """Objectif : maximiser le score de fraude des arcs TRAIN empruntés."""
+    def _add_objective(self, model, x, arc_ids, arcs_accessibles, excluded_trip_ids=None):
+        """
+        Objectif : maximiser le score de fraude.
+        Anti-doublons : les trip_ids déjà utilisés par d'autres agents
+        reçoivent un malus de 50% pour favoriser la diversité des tournées.
+        """
         import pulp
+        excluded = excluded_trip_ids or set()
         model += pulp.lpSum(
-            arcs_accessibles[i].fraud_score * x[i]
+            arcs_accessibles[i].fraud_score
+            * (0.5 if arcs_accessibles[i].trip_id in excluded else 1.0)
+            * x[i]
             for i in arc_ids
             if arcs_accessibles[i].arc_type == ArcType.TRAIN
         ), "objectif_score_fraude"
-
     def _add_exclusion_constraint(self, model, x, arc_ids, arcs_accessibles, excluded_trip_ids):
         """
         Anti-doublons (contrainte dure) : interdit tout arc TRAIN dont le
@@ -437,37 +458,24 @@ class OrienteeringOptimizer(BaseOptimizer):
         if train_ids:
             model += (pulp.lpSum(x[i] for i in train_ids) >= 1), "min_un_train"
 
-    def _add_return_constraint(self, model, x, arc_ids, arcs_accessibles, gare_arrivee_id: str,
-                               idx_sortants: dict):
-        """
-        Exactement 1 arc TRAIN arrive à gare_arrivee_id, et le chemin s'y termine.
-
-        Contrainte de conflit : si l'arc de retour i_k est actif (x[i_k]=1),
-        tous les arcs sortants du nœud de destination sont forcés à 0.
-        Si i_k n'est pas actif, les sortants sont libres (la chaîne CORR peut passer).
-        """
+    def _add_pause_constraint(self, model, x, arc_ids, arcs_accessibles,
+                              pause_debut_min: int, pause_fin_min: int):
+        """Interdit tout arc TRAIN qui chevauche la fenêtre de pause de l'agent."""
         import pulp
-        arcs_retour = [
+        arcs_pause = [
             i for i in arc_ids
             if arcs_accessibles[i].arc_type == ArcType.TRAIN
-               and arcs_accessibles[i].destination.stop_id == gare_arrivee_id
+            and arcs_accessibles[i].source.time_minutes < pause_fin_min
+            and arcs_accessibles[i].destination.time_minutes > pause_debut_min
         ]
-        if not arcs_retour:
-            raise ValueError(
-                f"[OrienteeringOptimizer] Aucun train n'arrive à {gare_arrivee_id} "
-                f"dans le sous-graphe accessible. Élargissez la fenêtre PS/FS."
-            )
-        model += (
-                pulp.lpSum(x[i] for i in arcs_retour) == 1
-        ), "retour_gare_arrivee"
+        logger.info(
+            "[OrienteeringOptimizer] Pause %02dh%02d–%02dh%02d : %d arcs TRAIN interdits.",
+            pause_debut_min // 60, pause_debut_min % 60,
+            pause_fin_min // 60, pause_fin_min % 60, len(arcs_pause),
+        )
+        for i in arcs_pause:
+            model += (x[i] == 0), f"pause_{i}"
 
-        # Conflit conditionnel : si arc de retour i_k actif → sortants du nœud bloqués.
-        # Contrairement à fin_retour qui bloquait tous les nœuds en permanence,
-        # ici seul le nœud CHOISI par CBC est bloqué. Les autres restent traversables.
-        for ctr_idx, i_k in enumerate(arcs_retour):
-            node = arcs_accessibles[i_k].destination
-            for j in idx_sortants.get(node, []):
-                model += (x[j] + x[i_k] <= 1), f"conflit_retour_{ctr_idx}_{j}"
 
     def _add_single_arrival_constraint(
             self, model, x, idx_entrants, sink_nodes

@@ -471,6 +471,8 @@ def _run_solver(
         duree_max_minutes=request.duree_max_minutes,
         gare_arrivee_id=gare_arrivee_id,
         excluded_trip_ids=excluded_trip_ids,
+        pause_debut_min=request.pause_debut_min,
+        pause_fin_min=request.pause_fin_min,
     )
 
 def _do_generate_tournee(

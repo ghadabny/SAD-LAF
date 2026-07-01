@@ -53,6 +53,14 @@ class TourneeRequestFileSchema(BaseModel):
         default=None,
         description="Code UIC 8 chiffres de la gare d'arrivée (None = gare de départ en aller_retour)",
     )
+    pause_debut_min: Optional[int] = Field(
+        default=None, ge=0, le=1439,
+        description="Début de la pause agent (minutes depuis minuit). None = pas de pause.",
+    )
+    pause_fin_min: Optional[int] = Field(
+        default=None, ge=0, le=1439,
+        description="Fin de la pause agent (minutes depuis minuit). None = pas de pause.",
+    )
 
     @field_validator("gare_depart_id")
     @classmethod
