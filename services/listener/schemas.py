@@ -73,11 +73,21 @@ class TourneeRequestFileSchema(BaseModel):
             )
         return v
 
+    @field_validator("pause_debut_min", "pause_fin_min", mode="before")
+    @classmethod
+    def vider_null_textuel(cls, v):
+        """Coercition Power Automate : "null"/"" → None."""
+        if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
+            return None
+        return v
+
     @field_validator("gare_arrivee_id", mode="before")
     @classmethod
     def valider_gare_arrivee(cls, v: Optional[str]) -> Optional[str]:
-        """Valide optionnellement l'identifiant de gare d'arrivée."""
-        if v is not None and (not v.isdigit() or len(v) != 8):
+        """Nettoie "null"/"" (Power Automate) puis valide le code UIC."""
+        if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
+            return None
+        if v is not None and (not str(v).isdigit() or len(str(v)) != 8):
             raise ValueError(
                 f"gare_arrivee_id invalide : '{v}'. "
                 "Attendu : 8 chiffres ou null."
