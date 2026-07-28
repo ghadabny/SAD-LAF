@@ -216,6 +216,16 @@ Voir `config/.env.example` pour la liste complète avec descriptions.
 
 ---
 
+## Installation données gtfs manuelle
+
+- **Clean Architecture** — séparation stricte domaine / infrastructure
+- Aller sur le site : https://ressources.data.sncf.com/explore/dataset/horaires-sncf/information/
+- Cliquer sur le lien : https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip
+- Ouvrir le dossier téléchargé
+- Copier le contenu et le coller dans le dossier **SAD-LAF/data/raw/gtfs**
+
+---
+
 ## Principes d'architecture
 
 - **Clean Architecture** — séparation stricte domaine / infrastructure
