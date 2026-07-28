@@ -226,6 +226,16 @@ Voir `config/.env.example` pour la liste complète avec descriptions.
 
 ---
 
+## Changement de propriétaire sur les flux PowerAutomate
+
+**Pour tester le flux**
+- Cloner d'abord le repo et copier le dossier data/
+- Changer le connecteur OneDrive a celui du nouveau propriétaire de flux
+- Vérifier les références de connecteur
+- Lancer les testes
+
+---
+
 ## Principes d'architecture
 
 - **Clean Architecture** — séparation stricte domaine / infrastructure
