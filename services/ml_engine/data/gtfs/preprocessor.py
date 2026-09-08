@@ -1,5 +1,5 @@
 import pandas as pd
-
+from shared.constants import is_in_perimetre_laf
 
 class GTFSPreprocessor:
     """
@@ -116,22 +116,8 @@ class GTFSPreprocessor:
         stops: pd.DataFrame,
         routes: pd.DataFrame,
         ter_only: bool = True,
+        filter_perimetre_laf: bool = True,   # ← nouveau paramètre
     ) -> pd.DataFrame:
-        """
-        Construit la table des tronçons origine-destination.
-
-        Un tronçon = un train entre deux arrêts CONSÉCUTIFS.
-        C'est l'unité de granularité du scoring LAF.
-
-        Paramètres:
-            stop_times : DataFrame brut de stop_times.txt
-            trips      : DataFrame brut de trips.txt
-            stops      : DataFrame brut de stops.txt
-            routes     : DataFrame brut de routes.txt
-            ter_only   : True = filtre sur TER uniquement (recommandé)
-
-        Retourne un DataFrame avec les colonnes définies dans TRONCON_COLUMNS.
-        """
         print("[GTFSPreprocessor] Construction des tronçons en cours...")
 
         if ter_only:
@@ -144,12 +130,38 @@ class GTFSPreprocessor:
         troncons   = self._apply_shift(stop_times)
         troncons   = self._filter_invalid(troncons)
 
+        if filter_perimetre_laf:
+            troncons = self._filter_perimetre_laf(troncons)   # ← nouveau
+
         print(
             f"[GTFSPreprocessor] {len(troncons):,} tronçons construits "
             f"({troncons['trip_id'].nunique():,} trips, "
             f"{troncons['stop_name_dep'].nunique():,} gares de départ uniques)."
         )
         return troncons[self.TRONCON_COLUMNS].reset_index(drop=True)
+
+    def _filter_perimetre_laf(self, troncons: pd.DataFrame) -> pd.DataFrame:
+        """
+        Ne conserve que les tronçons dont la gare de DÉPART et la gare
+        d'ARRIVÉE font toutes les deux partie du périmètre des équipes LAF.
+
+        Un tronçon dont une seule des deux gares est hors périmètre est
+        exclu — cela évite de proposer des trajets qui sortent du périmètre
+        opérationnel même partiellement.
+        """
+        before = len(troncons)
+        mask = (
+                troncons["stop_name_dep"].apply(is_in_perimetre_laf)
+                & troncons["stop_name_arr"].apply(is_in_perimetre_laf)
+        )
+        result = troncons[mask].reset_index(drop=True)
+        removed = before - len(result)
+        if removed > 0:
+            print(
+                f"[GTFSPreprocessor] {removed:,} tronçons hors périmètre LAF "
+                f"supprimés ({len(result):,} conservés)."
+            )
+        return result
 
     # ── Méthodes privées — une étape = une méthode ────────────────────────────
 

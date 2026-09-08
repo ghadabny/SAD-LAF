@@ -1,5 +1,119 @@
 from datetime import date
+import re
+import unicodedata
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Périmètre géographique des équipes LAF
+# Toute gare absente de cette liste est exclue de la construction des tronçons,
+# donc n'apparaît jamais ni dans l'entraînement ML, ni dans les tournées générées.
+# ─────────────────────────────────────────────────────────────────────────────
+PERIMETRE_LAF_STATIONS_RAW: list[str] = [
+    "Laon", "Coucy-lès-Eppes", "Saint-Erme", "Amifontaine", "Guignicourt",
+    "Aguilcourt - Variscourt", "Loivre", "Courcy - Brimont", "Fismes",
+    "Magneux - Courlandon", "Breuil - Romain", "Jonchery-sur-Vesle", "Muizon",
+    "Metz Nord", "Reims", "Bazancourt", "Amagne - Lucquy", "Rethel",
+    "Poix-Terron", "Bogny-sur-Meuse", "Monthermé", "Deville", "Laifour",
+    "Anchamps", "Revin", "Fumay", "Haybes", "Fépin", "Vireux-Molhain",
+    "Aubrives", "Givet", "Charleville-Mézières", "Nouzonville", "Joigny-sur-Meuse",
+    "Hirson", "Mohon", "Lumes", "Nouvion-sur-Meuse", "Vrigne-Meuse", "Donchery",
+    "Sedan", "Carignan",  "Montmédy", "Longuyon",
+    "Reims Maison Blanche", "Prunay", "Val-de-Vesle", "Sept-Saulx",
+    "Mourmelon-le-Petit",  "Château-Thierry",
+    "Rilly-la-Montagne", "Germaine", "Avenay", "Ay-Champagne",
+    "Épernay", "Dormans", "Châlons-en-Champagne",  "Baroncourt", "Conflans - Jarny", "Étain", "Verdun",
+    "Lérouville", "Nançois - Tronville", "Vitry-le-François",
+    "Longueville", "Nogent-sur-Seine", "Romilly-sur-Seine",
+     "Troyes", "Vendeuvre", "Bar-sur-Aube", "Chaumont", "Bologne",
+    "Vignory", "Froncles", "Donjeux", "Joinville", "Chevillon", "Saint-Dizier",
+    "Revigny", "Bar-le-Duc", "Commercy", "Pagny-sur-Meuse", "Foug", "Langres",
+     "Culmont - Chalindrey", "Neufchâteau", "Houdemont", "Ludres", "Messein",
+    "Neuves-Maisons", "Pont-Saint-Vincent", "Toul", "Fontenoy-sur-Moselle",
+    "Liverdun", "Nancy", "Pompey", "Frouard", "Champigneulles", "Marbache",
+    "Belleville", "Dieulouard", "Pont-à-Mousson", "Vandières",
+    "Pagny-sur-Moselle", "Onville", "Novéant-sur-Moselle", "Ancy-sur-Moselle", "Ars-sur-Moselle",
+     "Hatrize", "Valleroy - Moineville",
+    "Joeuf", "Auboué", "Homécourt", "Gandrange - Amnéville",
+    "Rombas - Clouange", "Moyeuvre-Grande", "Audun-le-Roman", "Hayange",
+    "Longwy", "Thionville", "Rodange", "Petange", "Bascharage secteur Sanem",
+    "Dippach secteur Reckange", "Luxembourg secteur Hollerich", "Bettembourg", "Hettange-Grande",
+    "Howald", "Luxembourg", "Walygator Parc", "Metz Nord", "Woippy",
+    "Maizières-lès-Metz", "Metz", "Hagondange", "Uckange", "Konz Mitte",
+    "Basse-Ham", "Malling", "Koenigsmacker", "Apach", "Perl",
+    "Sierck-les-Bains", "Jarville-la-Malgrange",
+    "Laneuveville-devant-Nancy", "Varangéville - Saint-Nicolas",
+    "Dombasle-sur-Meurthe", "Einvaux", "Bayon", "Charmes", "Vincey",
+    "Châtel - Nomexy", "Igney", "Thaon", "Blainville - Damelevières",
+    "Peltre", "Courcelles-sur-Nied", "Rémilly", "Sanry-sur-Nied", "Épinal",   "Vesoul", "Lure", "Pouxeux", "Éloyes", "Saint-Nabord", "Arches",
+    "Remiremont", "Bruyères",
+    "Belfort-Ville", "Petit-Croix", "Montreux-Vieux", "Dannemarie", "Altkirch",
+    "Walheim", "Illfurth", "Zillisheim", "Flaxlanden", "Mulhouse","Rosières-aux-Salines", "Basel SBB", "Bâle Saint-Jean", "Saint-Louis", "Saint-Louis la Chaussée",
+    "Bartenheim", "Sierentz", "Habsheim", "Rixheim", "Mulhouse Dornach",
+    "Lutterbach", "Graffenwald", "Cernay", "Vieux-Thann",
+    "Thann", "Thann Centre", "Thann Saint-Jacques", "Bitschwiller-lès-Thann",
+    "Willer-sur-Thur", "Moosch", "Saint-Amarin", "Ranspach", "Wesserling",
+    "Fellering", "Oderen", "Kruth", "Mont-sur-Meurthe", "Lunéville", "Bollwiller",
+    "Merxheim", "Raedersheim", "Staffelfelden", "Rouffach",
+    "Herrlisheim-près-Colmar", "Colmar", "Colmar Saint-Joseph",
+    "Colmar Mésanges", "Logelbach", "Ingersheim Cité Scolaire", "Turckheim", "Saint-Gilles-Croix-de-Vie",
+    "Breitenbach", "Muhlbach-sur-Munster", "Thiaville", "Bertrichamps",
+    "Raon-l'Étape", "Étival-Clairefontaine", "Saint-Michel-sur-Meurthe",
+    "Saint-Clément - Laronxe", "Réding", "Chenevières", "Ménil - Flin",
+    "Azerailles", "Baccarat", "Provenchères-sur-Fave", "Saales", "Bourg-Bruche",
+    "Saint-Blaise-la-Roche", "Fouday", "Rothau",
+    "Schirmeck - la Broque", "Russ-Hersbach", "Wisches",
+    "Lutzelhouse", "Mullerhof", "Urmatt",
+    "Heiligenberg - Mollkirch", "Gresswiller", "Mutzig", "Molsheim",
+    "Dachstein", "Duttlenheim", "Duppigheim",
+    "Entzheim Aéroport", "Lingolsheim", "Strasbourg Roethig", "Strasbourg",
+    "Igney - Avricourt", "Berthelming", "Bénestroff", "Morhange", "Herny",
+    "Faulquemont", "Teting-sur-Nied",   "Saint-Avold",
+    "Hombourg-Haut", "Béning-lès-Saint-Avold", "Farébersviller", "Farschviller", "Hundling Hôtel de Ville",
+    "Forbach", "Sarrebruck",  "Sarrebourg",
+    "Lutzelbourg", "Saverne", "Steinbourg", "Dettwiller", "Wilwisheim",
+    "Hochfelden", "Schwindratzheim", "Mommenheim", "Brumath", "Vendenheim",
+    "Stephansfeld", "Mundolsheim", "Dorlisheim", "Rosheim",
+    "Bischoffsheim", "Goxwiller", "Gertwiller", "Eichhoffen",
+    "Dambach-la-Ville", "Scherwiller", "Obernai", "Barr", "Epfig", "Luttenbach-près-Munster", "Munster",
+    "Munster Badischhof", "Gunsbach - Griesbach", "Wihr-au-Val - Soultzbach",
+    "Walbach - La Forge", "Sélestat", "Ebersheim",
+    "Kogenheim", "Benfeld", "Graffenstaden", "Geispolsheim",
+    "Fegersheim - Lipsheim", "Limersheim", "Erstein", "Matzenheim",
+    "Legelshurst", "Kork", "Appenweier", "Offenburg", "Fribourg en Brisgau",
+]
+
+_DASH_PATTERN  = re.compile(r"[\u2010-\u2015\-]+")   # tirets courts/longs/en dash
+_QUOTE_PATTERN = re.compile(r"[’‘']")
+_SPACE_PATTERN = re.compile(r"\s+")
+
+
+def _normalize_station_name(name: str) -> str:
+    """
+    Normalise un nom de gare pour permettre la comparaison entre le format
+    GTFS SNCF et le format de la liste métier LAF.
+
+    Étapes : suppression des accents, minuscules, uniformisation des tirets/
+    apostrophes/slashs, compression des espaces multiples.
+    """
+    if not name:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(name))
+    no_accent  = "".join(c for c in decomposed if not unicodedata.combining(c))
+    lowered    = no_accent.lower()
+    lowered    = _QUOTE_PATTERN.sub("'", lowered)
+    lowered    = _DASH_PATTERN.sub("-", lowered)
+    lowered    = lowered.replace("/", " ").replace("-", "-")
+    lowered    = _SPACE_PATTERN.sub(" ", lowered).strip(" -")
+    return lowered
+
+
+PERIMETRE_LAF_STATIONS: frozenset[str] = frozenset(
+    _normalize_station_name(n) for n in PERIMETRE_LAF_STATIONS_RAW
+)
+
+
+def is_in_perimetre_laf(stop_name: str) -> bool:
+    """Retourne True si la gare (nom GTFS) fait partie du périmètre LAF."""
+    return _normalize_station_name(stop_name) in PERIMETRE_LAF_STATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 # Contraintes métier LAF
 # Source : cahier des charges Direction de Lignes Alsace / UO Bord

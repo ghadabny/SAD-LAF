@@ -115,3 +115,35 @@ class TestBuildTroncons:
             stop_times, trips, stops, routes, ter_only=False
         )
         assert (troncons["stop_id_dep"] != troncons["stop_id_arr"]).all()
+
+class TestFilterPerimetreLAF:
+
+    def setup_method(self):
+        self.preprocessor = GTFSPreprocessor()
+
+    def test_exclut_gare_hors_perimetre(self):
+        troncons = pd.DataFrame([
+            {"stop_name_dep": "Strasbourg", "stop_name_arr": "Paris",
+             "trip_id": "T1", "train_number": "1", "service_id": "S1",
+             "stop_sequence": 0, "stop_id_dep": "1", "dep_minutes": 0,
+             "stop_id_arr": "2", "arr_minutes": 30, "duration_min": 30},
+        ])
+        result = self.preprocessor._filter_perimetre_laf(troncons)
+        assert result.empty
+
+    def test_conserve_tronçon_dans_perimetre(self):
+        troncons = pd.DataFrame([
+            {"stop_name_dep": "Strasbourg", "stop_name_arr": "Sélestat",
+             "trip_id": "T1", "train_number": "1", "service_id": "S1",
+             "stop_sequence": 0, "stop_id_dep": "1", "dep_minutes": 0,
+             "stop_id_arr": "2", "arr_minutes": 30, "duration_min": 30},
+        ])
+        result = self.preprocessor._filter_perimetre_laf(troncons)
+        assert len(result) == 1
+
+    def test_normalisation_accents_tirets(self):
+        """'Sélestat' avec ou sans accent doit matcher."""
+        from shared.constants import is_in_perimetre_laf
+        assert is_in_perimetre_laf("Sélestat")
+        assert is_in_perimetre_laf("Rosières-aux-Salines")
+        assert not is_in_perimetre_laf("Paris")
